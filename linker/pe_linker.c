@@ -81,7 +81,7 @@ static void parse_directives(TB_Linker* l, const uint8_t* curr, const uint8_t* e
         const uint8_t* end = curr;
         while (end != end_directive && *end != ' ') end++;
 
-        printf("directive: %.*s\n", (int) (end - curr), curr);
+        // printf("directive: %.*s\n", (int) (end - curr), curr);
 
         if (*curr == 0 || curr == end_directive) {
             break;
@@ -149,8 +149,9 @@ static void parse_directives(TB_Linker* l, const uint8_t* curr, const uint8_t* e
             const uint8_t* equals = curr;
             while (*equals && *equals != '=') equals++;
 
-            // printf("alternate: %.*s\n", (int) (end - curr), curr);
             if (*equals == '=') {
+                // printf("alternate: %.*s\n", (int) (end - curr), curr);
+
                 TB_LinkerCmd cmd = {
                     .from = { curr, equals - curr },
                     .to   = { equals + 1, (end - equals) - 1 },
@@ -1298,7 +1299,7 @@ static bool pe_export(TB_Linker* l, const char* file_name) {
         }
     }
 
-    if (0) {
+    if (1) {
         tb_linker_print_map(l);
     }
 

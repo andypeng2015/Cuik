@@ -347,10 +347,17 @@ void tb_linker_complete_appends(TB_Linker* l) {
         qsort(l->default_libs, dyn_array_length(l->default_libs), sizeof(const char*), compare_str);
 
         dyn_array_for(i, l->alternate_names) {
-            // if "from" was never defined, we should
-            TB_LinkerSymbol* from = tb_linker_find_symbol(l, l->alternate_names[i].from);
-            if (from != NULL && from->tag == TB_LINKER_SYMBOL_UNKNOWN) {
-                TB_LinkerSymbol* to = tb_linker_import_symbol(l, l->alternate_names[i].to);
+            TB_LinkerCmd cmd = l->alternate_names[i];
+
+            // if "from" is not defined, we used "to". if it's been defined
+            // at this point, we don't add the weak link.
+            TB_LinkerSymbol* from = tb_linker_find_symbol(l, cmd.from);
+            if (from == NULL || from->tag == TB_LINKER_SYMBOL_UNKNOWN || from->tag == TB_LINKER_SYMBOL_LAZY) {
+                if (from == NULL) {
+                    from = tb_linker_import_symbol(l, cmd.from);
+                }
+
+                TB_LinkerSymbol* to = tb_linker_import_symbol(l, cmd.to);
                 tb_linker_symbol_weak(l, from, to);
             }
         }
@@ -608,12 +615,7 @@ void tb_linker_lazy_resolve(TB_Linker* l, TB_LinkerSymbol* sym, TB_LinkerObject*
             }
         }
 
-        if (strsuffix(obj->name.data, "cfg_fo.obj", obj->name.length)) {
-            __debugbreak();
-        }
-
-        /* static const char sss[] = "_guard_dispatch_icall";
-        if (sym->name.length == sizeof(sss)-1 && memcmp((const char*) sym->name.data, sss, sizeof(sss)-1) == 0) {
+        /* if (strsuffix(obj->name.data, "checkcfg.obj", obj->name.length)) {
             __debugbreak();
         } */
 
@@ -632,10 +634,15 @@ static const char* tag_name(int tag) {
     }
 }
 
+static bool is_symbol_defined(TB_LinkerSymbol* sym) {
+    return sym->tag != TB_LINKER_SYMBOL_UNKNOWN && sym->tag != TB_LINKER_SYMBOL_LAZY;
+}
+
 TB_LinkerSymbol* tb_linker_symbol_insert(TB_Linker* l, TB_LinkerSymbol* sym) {
     // printf("%.*s    %"PRIx32"\n", (int) sym->name.length, sym->name.data, tb__murmur3_32(sym->name.data, sym->name.length) & 65535);
 
-    static const char sss[] = "_guard_check_icall"; // "_guard_check_icall_$fo_default$";
+    #if 0 // For debugging
+    static const char sss[] = "_guard_check_icall_$fo_default$";
     if (sym->name.length == sizeof(sss)-1 && memcmp((const char*) sym->name.data, sss, sizeof(sss)-1) == 0) {
         mtx_lock(&l->lock);
         printf("INSERT %.*s %d (%s)", (int) sym->name.length, sym->name.data, sym->comdat, tag_name(sym->tag));
@@ -659,6 +666,7 @@ TB_LinkerSymbol* tb_linker_symbol_insert(TB_Linker* l, TB_LinkerSymbol* sym) {
         printf("\n");
         mtx_unlock(&l->lock);
     }
+    #endif
 
     // insert into global symbol table
     TB_LinkerSymbol* old2 = namehs_intern(&l->symbols, sym);
@@ -672,15 +680,22 @@ TB_LinkerSymbol* tb_linker_symbol_insert(TB_Linker* l, TB_LinkerSymbol* sym) {
                 sym = old;
             }
         } else if (old->tag == TB_LINKER_SYMBOL_LAZY || sym->tag == TB_LINKER_SYMBOL_LAZY) {
-            // Whichever symbol is lazy gets resolved
-            bool is_new_lazy = sym->tag == TB_LINKER_SYMBOL_LAZY;
+            // If the symbol is already defined, don't load the lazy one
             bool is_new_leader;
-            if (is_new_lazy) {
-                tb_linker_lazy_resolve(l, sym, sym->lazy.obj);
-                is_new_leader = old->tag == TB_LINKER_SYMBOL_UNKNOWN;
+            if (is_symbol_defined(old)) {
+                is_new_leader = false;
+            } else if (is_symbol_defined(sym)) {
+                is_new_leader = true;
             } else {
-                tb_linker_lazy_resolve(l, old, old->lazy.obj);
-                is_new_leader = sym->tag != TB_LINKER_SYMBOL_UNKNOWN;
+                // Whichever symbol is lazy gets resolved
+                bool is_new_lazy = sym->tag == TB_LINKER_SYMBOL_LAZY;
+                if (is_new_lazy) {
+                    tb_linker_lazy_resolve(l, sym, sym->lazy.obj);
+                    is_new_leader = old->tag == TB_LINKER_SYMBOL_UNKNOWN;
+                } else {
+                    tb_linker_lazy_resolve(l, old, old->lazy.obj);
+                    is_new_leader = sym->tag != TB_LINKER_SYMBOL_UNKNOWN;
+                }
             }
 
             if (is_new_leader) {
