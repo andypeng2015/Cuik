@@ -884,7 +884,7 @@ Token lexer_read(Lexer* restrict l) {
     // NOTE(NeGate): the lexer will modify code to allow for certain patterns
     // if we wanna get rid of this we should make virtual code regions
     if (__builtin_expect(current[0] == '\\' && (current[1] == '\r' || current[1] == '\n'), 0)) {
-        __debugbreak();
+        assert(0 && "TODO");
     }
 
     l->current = current;

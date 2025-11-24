@@ -163,7 +163,7 @@ void tb_linker_print_map(TB_Linker* l) {
         // add padding
         printf("%*s", len < 80 ? 80 - len : 1, "");
         print_name(sym->normal.piece->obj->name);
-        printf(" (%#llx)\n", sym->normal.piece->order);
+        printf(" (%#"PRIx64")\n", sym->normal.piece->order);
     }
 }
 

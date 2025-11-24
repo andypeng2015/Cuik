@@ -1,6 +1,8 @@
 #include "tb_internal.h"
 #include "host.h"
 
+void* tb_jit_stack_create(size_t size);
+
 #ifdef EMSCRIPTEN
 void* tb_jit_wasm_obj(TB_Arena* arena, TB_Function* f) {
     TB_Arena* arena = get_temporary_arena(m);
