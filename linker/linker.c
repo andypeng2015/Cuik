@@ -124,6 +124,10 @@ static void print_name(TB_Slice name) {
     printf("%.*s", (int) (name.length - slash), (const char*) name.data + slash);
 }
 
+static bool is_symbol_defined(TB_LinkerSymbol* sym) {
+    return sym->tag != TB_LINKER_SYMBOL_UNKNOWN && sym->tag != TB_LINKER_SYMBOL_LAZY;
+}
+
 void tb_linker_print_map(TB_Linker* l) {
     printf(" Start         Length     Name                   Class\n");
     dyn_array_for(i, l->sections_arr) {
@@ -139,7 +143,7 @@ void tb_linker_print_map(TB_Linker* l) {
     DynArray(TB_LinkerSymbol*) symbols = NULL;
     nbhs_for(e, &l->symbols) {
         TB_LinkerSymbol* sym = tb_linker_symbol_find(*e);
-        if (sym->tag == TB_LINKER_SYMBOL_NORMAL && (sym->flags & TB_LINKER_SYMBOL_USED)) {
+        if ((sym->tag == TB_LINKER_SYMBOL_NORMAL || sym->tag == TB_LINKER_SYMBOL_IMPORT) && (sym->flags & TB_LINKER_SYMBOL_USED)) {
             dyn_array_put(symbols, sym);
         }
     }
@@ -148,22 +152,24 @@ void tb_linker_print_map(TB_Linker* l) {
     printf("\n  Address         Publics by Value              Rva+Base               Lib:Object\n\n");
     dyn_array_for(i, symbols) {
         TB_LinkerSymbol* sym = symbols[i];
-        if (sym->comdat == TB_LINKER_COMDAT_NONE) {
-            continue;
-        }
 
         uint32_t secidx = 0;
         uint32_t secrel = 0;
-        if (sym->normal.piece->parent->segment) {
+        if (sym->tag == TB_LINKER_SYMBOL_NORMAL && sym->normal.piece->parent->segment) {
             secidx = sym->normal.piece->parent->segment->number;
             secrel = sym->normal.piece->offset + sym->normal.secrel;
+        } else if (sym->tag == TB_LINKER_SYMBOL_IMPORT) {
+            secrel = sym->import.thunk_id;
         }
 
         int len = printf(" %04"PRIx32":%08"PRIx32"       %.*s", secidx, secrel, (int) sym->name.length, sym->name.data);
         // add padding
         printf("%*s", len < 80 ? 80 - len : 1, "");
-        print_name(sym->normal.piece->obj->name);
-        printf(" (%#llx)\n", sym->normal.piece->order);
+        if (sym->tag == TB_LINKER_SYMBOL_NORMAL) {
+            print_name(sym->normal.piece->obj->name);
+            printf(" (%#llx)", sym->normal.piece->order);
+        }
+        printf("\n");
     }
 }
 
@@ -403,6 +409,8 @@ uint64_t tb__get_symbol_rva(TB_LinkerSymbol* sym) {
         return 0;
     } else if (sym->tag == TB_LINKER_SYMBOL_IMAGEBASE) {
         return sym->imagebase;
+    } else if (sym->tag == TB_LINKER_SYMBOL_IMPORT) {
+        return 0x80000000 + sym->import.thunk_id;
     }
 
     // normal or TB
@@ -599,11 +607,6 @@ TB_LinkerSymbol* tb_linker_symbol_find(TB_LinkerSymbol* sym) {
     return sym;
 }
 
-static bool strsuffix(const uint8_t* str, const char* suf, size_t len) {
-    size_t suflen = strlen(suf);
-    return len >= suflen && memcmp(&str[len - suflen], suf, suflen) == 0;
-}
-
 void tb_linker_lazy_resolve(TB_Linker* l, TB_LinkerSymbol* sym, TB_LinkerObject* obj) {
     bool expected = false;
     if (atomic_compare_exchange_strong(&obj->loaded, &expected, true)) {
@@ -615,10 +618,6 @@ void tb_linker_lazy_resolve(TB_Linker* l, TB_LinkerSymbol* sym, TB_LinkerObject*
             }
         }
 
-        /* if (strsuffix(obj->name.data, "checkcfg.obj", obj->name.length)) {
-            __debugbreak();
-        } */
-
         log_debug("Loaded %.*s for %.*s", (int) (obj->name.length - slash), obj->name.data + slash, (int) sym->name.length, sym->name.data);
         append(l, obj, l->vtbl.append_object);
     }
@@ -629,20 +628,17 @@ static const char* tag_name(int tag) {
         case TB_LINKER_SYMBOL_UNKNOWN: return "unknown";
         case TB_LINKER_SYMBOL_NORMAL: return "normal";
         case TB_LINKER_SYMBOL_LAZY: return "lazy";
+        case TB_LINKER_SYMBOL_IMPORT: return "import";
         case TB_LINKER_SYMBOL_TB: return "tb";
         default: return "???";
     }
-}
-
-static bool is_symbol_defined(TB_LinkerSymbol* sym) {
-    return sym->tag != TB_LINKER_SYMBOL_UNKNOWN && sym->tag != TB_LINKER_SYMBOL_LAZY;
 }
 
 TB_LinkerSymbol* tb_linker_symbol_insert(TB_Linker* l, TB_LinkerSymbol* sym) {
     // printf("%.*s    %"PRIx32"\n", (int) sym->name.length, sym->name.data, tb__murmur3_32(sym->name.data, sym->name.length) & 65535);
 
     #if 0 // For debugging
-    static const char sss[] = "_guard_check_icall_$fo_default$";
+    static const char sss[] = "__imp_UtcSendTraceLogging2"; // "__imp_VirtualAlloc2";
     if (sym->name.length == sizeof(sss)-1 && memcmp((const char*) sym->name.data, sss, sizeof(sss)-1) == 0) {
         mtx_lock(&l->lock);
         printf("INSERT %.*s %d (%s)", (int) sym->name.length, sym->name.data, sym->comdat, tag_name(sym->tag));
@@ -680,11 +676,14 @@ TB_LinkerSymbol* tb_linker_symbol_insert(TB_Linker* l, TB_LinkerSymbol* sym) {
                 sym = old;
             }
         } else if (old->tag == TB_LINKER_SYMBOL_LAZY || sym->tag == TB_LINKER_SYMBOL_LAZY) {
-            // If the symbol is already defined, don't load the lazy one
+            // If the symbol is already defined, don't load the lazy one.
+            //
+            // Special case:
+            //   IMPORT + LAZY = RESOLVE; KEEP IMPORT
             bool is_new_leader;
-            if (is_symbol_defined(old)) {
+            if (is_symbol_defined(old) && old->tag != TB_LINKER_SYMBOL_IMPORT) {
                 is_new_leader = false;
-            } else if (is_symbol_defined(sym)) {
+            } else if (is_symbol_defined(sym) && sym->tag != TB_LINKER_SYMBOL_IMPORT) {
                 is_new_leader = true;
             } else {
                 // Whichever symbol is lazy gets resolved
@@ -1250,8 +1249,9 @@ void tb_linker_push_named(TB_Linker* l, const char* name) {
 }
 
 bool tb_linker_push_piece(TB_Linker* l, TB_LinkerSectionPiece* p) {
-    if (p->parent->name.length >= 6 && memcmp((const char*) p->parent->name.data, ".idata", 6) == 0) {
-        // __debugbreak();
+    static const char sss[] = "api-ms-win-core-calendar-l1-1-0.dll";
+    if (p->obj->name.length == sizeof(sss)-1 && memcmp((const char*) p->obj->name.data, sss, sizeof(sss)-1) == 0) {
+        __debugbreak();
     }
 
     if (p->size == 0 || (p->flags & TB_LINKER_PIECE_LIVE) || (p->parent->generic_flags & TB_LINKER_SECTION_DISCARD)) {
@@ -1285,7 +1285,9 @@ void tb_linker_mark_live(TB_Linker* l) {
         TB_LinkerSection* s = *e;
         if (s->generic_flags & TB_LINKER_SECTION_DISCARD) { continue; }
         // we don't consider .debug as roots because codeview is compiled into the PDB
-        if (s->name.length == sizeof(".debug")-1 && memcmp(s->name.data, ".debug", s->name.length) == 0) { continue; }
+        if (s->name.length == sizeof(".debug")-1 && memcmp(s->name.data, ".debug", s->name.length) == 0) {
+            continue;
+        }
 
         TB_LinkerSectionPiece* p = atomic_load_explicit(&s->list, memory_order_relaxed);
         for (; p != NULL; p = atomic_load_explicit(&p->next, memory_order_relaxed)) {

@@ -74,6 +74,11 @@ static bool strprefix(const char* str, const char* pre, size_t len) {
     return tb_string_case_cmp(pre, str, len < prelen ? len : prelen) == 0;
 }
 
+static bool strsuffix(const uint8_t* str, const char* suf, size_t len) {
+    size_t suflen = strlen(suf);
+    return len >= suflen && memcmp(&str[len - suflen], suf, suflen) == 0;
+}
+
 static void parse_directives(TB_Linker* l, const uint8_t* curr, const uint8_t* end_directive) {
     while (curr != end_directive && *curr == ' ') curr++;
 
@@ -422,6 +427,11 @@ void pe_append_object(TPool* pool, void** args) {
 
     uint64_t order = obj->time;
     CUIK_TIMED_BLOCK("parse sections") {
+        if (strsuffix(obj->name.data, "api-ms-win-core-calendar-l1-1-0.dll", obj->name.length)) {
+            assert(parser.section_count != 0);
+            printf("ZZZ %zu\n", parser.section_count);
+        }
+
         FOR_N(i, 0, parser.section_count) {
             TB_ObjectSection* restrict s = &sections[i];
             tb_coff_parse_section(&parser, i, s);
@@ -468,6 +478,10 @@ void pe_append_object(TPool* pool, void** args) {
                     pdata_piece = p;
                 }
             }
+
+            if (strsuffix(obj->name.data, "api-ms-win-core-calendar-l1-1-0.dll", obj->name.length)) {
+                printf("AAA %.*s %#x\n", (int) s->name.length, s->name.data, p->flags);
+            }
         }
     }
 
@@ -499,7 +513,7 @@ void pe_append_object(TPool* pool, void** args) {
                     if (sec->name.length == sym->name.length && memcmp(sec->name.data, sym->name.data, sym->name.length) == 0) {
                         is_section = true;
 
-                        // printf("L: %d %zu %.*s\n", dollar, sym->name.length, (int) sym->name.length, sym->name.data);
+                        // printf("L: %d %zu %.*s\n", sym->name.length, (int) sym->name.length, sym->name.data);
 
                         // COMDAT is how linkers handle merging of inline functions in C++
                         if ((sec->flags & IMAGE_SCN_LNK_COMDAT)) {
@@ -637,7 +651,13 @@ static void lazy_import_task(TPool* pool, void** args) {
         const char* name = &strtab[j];
         size_t len = ideally_fast_strlen(name);
 
+        j += len + 1;
+        if (tb_archive_member_is_short(parser, offset_index)) {
+            continue;
+        }
+
         TB_ArchiveEntry e = tb_archive_member_get(parser, offset_index);
+        assert(e.content.length);
 
         // We don't *really* care about this info beyond nicer errors (use an arena tho)
         TB_LinkerObject* obj_file = tb_arena_alloc(&linker_perm_arena, sizeof(TB_LinkerObject));
@@ -662,7 +682,6 @@ static void lazy_import_task(TPool* pool, void** args) {
             tb_arena_free(&linker_perm_arena, s, sizeof(TB_LinkerSymbol));
             s = new_s;
         }
-        j += len + 1;
     }
 
     if (l->jobs.pool != NULL) {
@@ -712,32 +731,24 @@ void pe_append_library(TPool* pool, void** args) {
             TB_ArchiveFileParser* p = tb_arena_alloc(&linker_perm_arena, sizeof(TB_ArchiveFileParser));
             *p = ar_parser;
 
-            size_t i = 0, j = 0, start_i = 0, start_j = 0;
-            while (i < ar_parser.symbol_count) {
-                uint16_t offset_index = ar_parser.symbols[i] - 1;
-
-                const char* name = &strtab[j];
-                size_t len = ideally_fast_strlen(name);
-
-                // dispatch lazy syms
-                if (i - start_i >= 249) {
-                    l->jobs.count += 1;
-                    LazyImportTask* task = tb_arena_alloc(&linker_perm_arena, sizeof(LazyImportTask));
-                    *task = (LazyImportTask){ l, lib, p, start_i, start_j, (i - start_i) + 1 };
-                    tpool_add_task(l->jobs.pool, lazy_import_task, task);
-
-                    start_i = i, start_j = j;
+            size_t i = 0, str_head = 0;
+            for (size_t i = 0; i < ar_parser.symbol_count; i += 250) {
+                size_t limit = i + 250;
+                if (limit > ar_parser.symbol_count) {
+                    limit = ar_parser.symbol_count;
                 }
 
-                i += 1, j += len + 1;
-            }
-
-            // finish up the remaining work on this task
-            if (i != start_i) {
                 l->jobs.count += 1;
+                LazyImportTask* task = tb_arena_alloc(&linker_perm_arena, sizeof(LazyImportTask));
+                *task = (LazyImportTask){ l, lib, p, i, str_head, limit - i };
+                tpool_add_task(l->jobs.pool, lazy_import_task, task);
 
-                LazyImportTask t = { l, lib, p, start_i, start_j, i - start_i };
-                lazy_import_task(NULL, &(void*){ &t });
+                // Skip strings
+                FOR_N(j, i, limit) {
+                    uint16_t offset_index = ar_parser.symbols[j] - 1;
+                    const char* name = &strtab[str_head];
+                    str_head += ideally_fast_strlen(name) + 1;
+                }
             }
             #else
             abort(); // Unreachable
@@ -1252,15 +1263,15 @@ static bool pe_export(TB_Linker* l, const char* file_name) {
 
         printf("Segment %.*s: %#zx - %#zx\n", (int) s->name.length, s->name.data, s->offset, s->offset + s->size - 1);
 
-        /* if (s->name.length == 6 && memcmp(s->name.data, ".idata", 6) == 0) {
+        if (s->name.length == 6 && memcmp(s->name.data, ".idata", 6) == 0) {
             dyn_array_for(j, s->sections) {
                 dyn_array_for(k, s->sections[j]->pieces) {
                     TB_LinkerSectionPiece* p = s->sections[j]->pieces[k];
-                    printf("PIECE %zu %.*s\n", p->size, (int) p->obj->name.length, p->obj->name.data);
+                    printf("PIECE %zu %.*s %d\n", p->size, (int) p->obj->name.length, p->obj->name.data, (p->flags & TB_LINKER_PIECE_LIVE) != 0);
                 }
             }
             printf("AAA %zu\n", s->size);
-        } */
+        }
     }
 
     if (l->main_reloc != NULL) {
