@@ -2,6 +2,7 @@
 #include "str.h"
 #include "arena.h"
 #include "futex.h"
+#include <ctype.h>
 #include <stdatomic.h>
 
 #ifdef _WIN32

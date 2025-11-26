@@ -167,7 +167,7 @@ void tb_linker_print_map(TB_Linker* l) {
         printf("%*s", len < 80 ? 80 - len : 1, "");
         if (sym->tag == TB_LINKER_SYMBOL_NORMAL) {
             print_name(sym->normal.piece->obj->name);
-            printf(" (%#llx)", sym->normal.piece->order);
+            printf(" (%#"PRIx64")", sym->normal.piece->order);
         }
         printf("\n");
     }

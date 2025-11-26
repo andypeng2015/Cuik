@@ -428,7 +428,7 @@ static int walk_initializer_layer(TranslationUnit* tu, Cuik_Type* parent, int ba
                     if (expr_type->array.count == type->array.count + 1) {
                         // we chop off the null terminator
                         // e->str.end -= (e->op == EXPR_STR ? 1 : 2);
-                        __debugbreak();
+                        assert(0 && "TODO");
                         expr_type->array.count = type->array.count;
                     } else if (expr_type->array.count > type->array.count) {
                         diag_err(&tu->tokens, e->loc, "initializer-string too big for the initializer (%d elements out of %d)", expr_type->array.count, type->array.count);

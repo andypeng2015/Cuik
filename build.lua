@@ -189,7 +189,7 @@ else
     if is_windows then
         ld = "lld-link"
     else
-        ld = "lld"
+        ld = "clang -fuse-ld=lld"
     end
 end
 
@@ -248,17 +248,13 @@ if is_windows then
     end
 
     if is_windows then
-        ldflags = ldflags.." --time-trace /debug /defaultlib:libcmt /out:"
+        ldflags = ldflags.." /debug /defaultlib:libcmt /out:"
     else
         ldflags = ldflags.." -g -o "
     end
 else
     cflags  = cflags.." -D_GNU_SOURCE"
-    ldflags = " -lc -lm -g"
-    if not options.gcc then
-        ldflags = ldflags.." -fuse-ld=lld"
-    end
-
+    ldflags = " -lc -lm -g -o "
     if options.shared then
         cflags = cflags.." -fPIC"
         ldflags = ldflags.." -shared"
@@ -337,7 +333,7 @@ end
 table.insert(lines, "")
 
 local out = "bin/cuik"
-if is_exe then
+if is_windows then
     if options.shared then
         out = out..".dll"
     else

@@ -22,7 +22,7 @@ struct TB_GraphBuilder {
 };
 
 // From the optimizer
-static TB_Node* make_int_node(TB_Function* f, TB_DataType dt, uint64_t x);
+TB_Node* make_int_node(TB_Function* f, TB_DataType dt, uint64_t x);
 static TB_Node* identity_phi(TB_Function* f, TB_Node* n);
 
 static TB_Node* get_callgraph(TB_Function* f) { return f->root_node->inputs[0]; }

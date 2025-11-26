@@ -4,6 +4,7 @@ local operand_map = OrderedSet()
 add_line(0, "#include \"../emitter.h\"")
 add_line(0, "#include \"../tb_internal.h\"")
 add_line(0, "#include <string.h>")
+add_line(0, "#include <ctype.h>")
 add_line(0, "")
 
 add_line(0, "static void global_init() {}")
