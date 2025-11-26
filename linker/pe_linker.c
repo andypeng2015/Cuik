@@ -900,11 +900,23 @@ static void pe_parse_reloc(TB_Linker* l, TB_LinkerSectionPiece* p, size_t reloc_
     out_reloc->target     = p->symbol_map[rel.symbol_index];
 }
 
+static int compare_name(const void* a, const void* b) {
+    const TB_Slice* aa = *(const TB_Slice**) a;
+    const TB_Slice* bb = *(const TB_Slice**) b;
+
+    if (aa->length != bb->length) {
+        return aa->length - bb->length;
+    }
+    return memcmp(aa->data, bb->data, aa->length);
+}
+
 // returns the two new section pieces for the IAT and ILT
 static COFF_ImportDirectory* gen_imports(TB_Linker* l, PE_ImageDataDirectory* imp_dir, PE_ImageDataDirectory* iat_dir) {
     // cull unused imports
     size_t j = 0;
     size_t import_entry_count = 0;
+
+    DynArray(ImportTable*) sorted_imports = dyn_array_create(ImportTable*, 32);
     nbhs_for(e, &l->imports) {
         ImportTable* imp = *e;
         DynArray(TB_LinkerSymbol*) tbl = imp->thunks;
@@ -920,7 +932,18 @@ static COFF_ImportDirectory* gen_imports(TB_Linker* l, PE_ImageDataDirectory* im
         if (cnt > 0) {
             // there's an extra NULL terminator for the import entry lists
             import_entry_count += cnt + 1;
+
+            CUIK_TIMED_BLOCK("sort import syms") {
+                qsort(tbl, dyn_array_length(tbl), sizeof(TB_LinkerSymbol*), compare_name);
+            }
+
+            dyn_array_put(sorted_imports, imp);
         }
+    }
+
+    CUIK_TIMED_BLOCK("sort import tables") {
+        qsort(sorted_imports, dyn_array_length(sorted_imports), sizeof(ImportTable*), compare_name);
+        l->sorted_imports = sorted_imports;
     }
 
     if (import_entry_count == 0) {
@@ -933,9 +956,9 @@ static COFF_ImportDirectory* gen_imports(TB_Linker* l, PE_ImageDataDirectory* im
     uint32_t thunk_id_counter = 0;
     size_t import_dir_count = 0;
     l->trampolines = (TB_Emitter){ 0 };
-    nbhs_for(e, &l->imports) {
-        ImportTable* imp = *e;
-        if (dyn_array_length(imp->thunks) == 0) { continue; }
+    dyn_array_for(i, sorted_imports) {
+        ImportTable* imp = sorted_imports[i];
+        // printf("IMPORT %.*s\n", (int) imp->libpath.length, imp->libpath.data);
 
         dyn_array_for(j, imp->thunks) {
             imp->thunks[j]->import.ds_address = l->trampolines.count;
@@ -958,9 +981,8 @@ static COFF_ImportDirectory* gen_imports(TB_Linker* l, PE_ImageDataDirectory* im
     size_t import_dir_size = (1 + import_dir_count) * sizeof(COFF_ImportDirectory);
     size_t iat_size = import_entry_count * sizeof(uint64_t);
     size_t total_size = import_dir_size + 2*iat_size;
-    nbhs_for(e, &l->imports) {
-        ImportTable* imp = *e;
-        if (dyn_array_length(imp->thunks) == 0) { continue; }
+    dyn_array_for(i, sorted_imports) {
+        ImportTable* imp = sorted_imports[i];
 
         total_size += imp->libpath.length + 1;
         dyn_array_for(j, imp->thunks) {
@@ -1002,9 +1024,8 @@ static COFF_ImportDirectory* gen_imports(TB_Linker* l, PE_ImageDataDirectory* im
     *iat_dir = (PE_ImageDataDirectory){ import_piece_offset + import_dir_size, iat_size };
 
     size_t p = 0, q = 0;
-    nbhs_for(e, &l->imports) {
-        ImportTable* imp = *e;
-        if (dyn_array_length(imp->thunks) == 0) { continue; }
+    dyn_array_for(i, sorted_imports) {
+        ImportTable* imp = sorted_imports[i];
 
         COFF_ImportDirectory* header = &import_dirs[q++];
         *header = (COFF_ImportDirectory){
@@ -1261,17 +1282,7 @@ static bool pe_export(TB_Linker* l, const char* file_name) {
         s->address = virt_addr;
         virt_addr += align_up(s->size, 4096);
 
-        printf("Segment %.*s: %#zx - %#zx\n", (int) s->name.length, s->name.data, s->offset, s->offset + s->size - 1);
-
-        if (s->name.length == 6 && memcmp(s->name.data, ".idata", 6) == 0) {
-            dyn_array_for(j, s->sections) {
-                dyn_array_for(k, s->sections[j]->pieces) {
-                    TB_LinkerSectionPiece* p = s->sections[j]->pieces[k];
-                    printf("PIECE %zu %.*s %d\n", p->size, (int) p->obj->name.length, p->obj->name.data, (p->flags & TB_LINKER_PIECE_LIVE) != 0);
-                }
-            }
-            printf("AAA %zu\n", s->size);
-        }
+        // printf("Segment %.*s: %#zx - %#zx\n", (int) s->name.length, s->name.data, s->offset, s->offset + s->size - 1);
     }
 
     if (l->main_reloc != NULL) {
@@ -1310,7 +1321,7 @@ static bool pe_export(TB_Linker* l, const char* file_name) {
         }
     }
 
-    if (1) {
+    if (0) {
         tb_linker_print_map(l);
     }
 
@@ -1364,9 +1375,8 @@ static bool pe_export(TB_Linker* l, const char* file_name) {
         l->iat_pos = iat_dir.virtual_address;
 
         CUIK_TIMED_BLOCK("relocate imports and trampolines") {
-            nbhs_for(e, &l->imports) {
-                ImportTable* imp = *e;
-                if (dyn_array_length(imp->thunks) == 0) { continue; }
+            dyn_array_for(i, l->sorted_imports) {
+                ImportTable* imp = l->sorted_imports[i];
 
                 COFF_ImportDirectory* header = imp->header;
                 header->import_lookup_table  += rdata_rva;

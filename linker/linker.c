@@ -159,7 +159,7 @@ void tb_linker_print_map(TB_Linker* l) {
             secidx = sym->normal.piece->parent->segment->number;
             secrel = sym->normal.piece->offset + sym->normal.secrel;
         } else if (sym->tag == TB_LINKER_SYMBOL_IMPORT) {
-            secrel = sym->import.thunk_id;
+            secrel = sym->import.ordinal;
         }
 
         int len = printf(" %04"PRIx32":%08"PRIx32"       %.*s", secidx, secrel, (int) sym->name.length, sym->name.data);
@@ -171,6 +171,7 @@ void tb_linker_print_map(TB_Linker* l) {
         }
         printf("\n");
     }
+    dyn_array_destroy(symbols);
 }
 
 bool tb__linker_is_library_new(TB_Linker* l, const char* file_name) {
@@ -248,6 +249,36 @@ void tb_linker_append_module(TB_Linker* l, TB_Module* m) {
     #endif
 }
 
+static void linker_job_find_lib(TPool* pool, void** args) {
+    TB_Linker* l = args[0];
+    char* str = args[1];
+    uint64_t t = (uint64_t) args[2];
+
+    cuikperf_region_start("find lib", str);
+    char resolved_path[FILENAME_MAX];
+    FileMap fm = l->vtbl.find_lib(l, str, resolved_path);
+    if (fm.data != NULL) {
+        log_info("Loading library: %s", resolved_path);
+        size_t newlen = strlen(resolved_path);
+        char* newstr = linker_newstr(newlen, resolved_path);
+
+        TB_LinkerObject* lib_file = tb_arena_alloc(&linker_perm_arena, sizeof(TB_LinkerObject));
+        *lib_file = (TB_LinkerObject){
+            { (const uint8_t*) newstr, newlen },
+            l,
+            { fm.data, fm.size },
+            t,
+        };
+        append(l, lib_file, l->vtbl.append_library);
+    }
+
+    if (l->jobs.pool != NULL) {
+        l->jobs.done += 1;
+        futex_signal(&l->jobs.done);
+    }
+    cuikperf_region_end();
+}
+
 void tb_linker_append_library(TB_Linker* l, const char* file_name) {
     if (!linker_thread_init) {
         linker_thread_init = true;
@@ -265,42 +296,22 @@ void tb_linker_append_library(TB_Linker* l, const char* file_name) {
         return;
     }
 
-    cuikperf_region_start("find lib", file_name);
-    char resolved_path[FILENAME_MAX];
-    FileMap fm = l->vtbl.find_lib(l, file_name, resolved_path);
-    cuikperf_region_end();
+    uint64_t time = atomic_fetch_add(&l->time, 0x100000000);
+    void* args[] = { l, str, (void*) time };
 
-    if (fm.data == NULL) {
-        return;
-    }
-
-    log_info("Loading library: %s", resolved_path);
-
-    size_t newlen = strlen(resolved_path);
-    char* newstr = linker_newstr(newlen, resolved_path);
-
-    TB_LinkerObject* lib_file = tb_arena_alloc(&linker_perm_arena, sizeof(TB_LinkerObject));
-    *lib_file = (TB_LinkerObject){
-        { (const uint8_t*) newstr, newlen },
-        l,
-        { fm.data, fm.size },
-        atomic_fetch_add(&l->time, 0x100000000),
-    };
-    append(l, lib_file, l->vtbl.append_library);
-}
-
-/*#ifdef CONFIG_HAS_TB
-void tb_linker_append_module_section(TB_Linker* l, TB_LinkerObject* mod, TB_ModuleSection* section, uint32_t flags) {
-    assert(mod->module != NULL && "not a TB_Module's section?");
-    if (section->total_size > 0) {
-        TB_LinkerSection* ls = tb_linker_find_or_create_section(l, strlen(section->name), section->name, flags);
-
-        section->piece = tb_linker_append_piece(ls, PIECE_MODULE_SECTION, section->total_size, mod);
-        section->piece->obj = mod;
-        section->piece->ir_section = section;
+    if (l->jobs.pool != NULL) {
+        cuikperf_region_start("dispatch find lib", str);
+        #if CUIK_ALLOW_THREADS
+        l->jobs.count += 1;
+        tpool_add_task2(l->jobs.pool, linker_job_find_lib, 3, args);
+        #else
+        abort(); // Unreachable
+        #endif
+        cuikperf_region_end();
+    } else {
+        linker_job_find_lib(NULL, args);
     }
 }
-#endif*/
 
 bool tb_linker_export(TB_Linker* l, const char* file_name) {
     return l->vtbl.export(l, file_name);
@@ -372,11 +383,10 @@ void tb_linker_complete_appends(TB_Linker* l) {
         dyn_array_for(i, l->default_libs) {
             tb_linker_append_library(l, l->default_libs[i]);
         }
+        repeat = dyn_array_length(l->worklist) > 0 || dyn_array_length(l->default_libs) > 0;
 
         dyn_array_clear(l->alternate_names);
         dyn_array_clear(l->default_libs);
-
-        repeat = dyn_array_length(l->worklist);
         l->defer_jobs = false;
     } while (repeat);
     cuikperf_region_end();
@@ -638,7 +648,7 @@ TB_LinkerSymbol* tb_linker_symbol_insert(TB_Linker* l, TB_LinkerSymbol* sym) {
     // printf("%.*s    %"PRIx32"\n", (int) sym->name.length, sym->name.data, tb__murmur3_32(sym->name.data, sym->name.length) & 65535);
 
     #if 0 // For debugging
-    static const char sss[] = "__imp_UtcSendTraceLogging2"; // "__imp_VirtualAlloc2";
+    static const char sss[] = "__imp_Sleep"; // "__imp_VirtualAlloc2";
     if (sym->name.length == sizeof(sss)-1 && memcmp((const char*) sym->name.data, sss, sizeof(sss)-1) == 0) {
         mtx_lock(&l->lock);
         printf("INSERT %.*s %d (%s)", (int) sym->name.length, sym->name.data, sym->comdat, tag_name(sym->tag));
@@ -648,6 +658,8 @@ TB_LinkerSymbol* tb_linker_symbol_insert(TB_Linker* l, TB_LinkerSymbol* sym) {
             obj = sym->normal.piece->obj;
         } else if (sym->tag == TB_LINKER_SYMBOL_LAZY) {
             obj = sym->lazy.obj;
+        } else if (sym->tag == TB_LINKER_SYMBOL_IMPORT) {
+            printf(" I%d", sym->import.ordinal);
         }
 
         if (obj) {
@@ -668,7 +680,14 @@ TB_LinkerSymbol* tb_linker_symbol_insert(TB_Linker* l, TB_LinkerSymbol* sym) {
     TB_LinkerSymbol* old2 = namehs_intern(&l->symbols, sym);
     TB_LinkerSymbol* old = tb_linker_symbol_find(old2);
     if (sym != old) {
-        if (old->tag == TB_LINKER_SYMBOL_LAZY && sym->tag == TB_LINKER_SYMBOL_LAZY) {
+        if (old->tag == TB_LINKER_SYMBOL_IMPORT && sym->tag == TB_LINKER_SYMBOL_IMPORT) {
+            // pick the smaller ordinal
+            if (old->import.ordinal < sym->import.ordinal) {
+                tb_linker_symbol_union(l, sym, old);
+            } else {
+                sym = old;
+            }
+        } else if (old->tag == TB_LINKER_SYMBOL_LAZY && sym->tag == TB_LINKER_SYMBOL_LAZY) {
             // we assume the earlier lazy symbol is the one we use
             if (old->lazy.obj->time > sym->lazy.obj->time) {
                 tb_linker_symbol_union(l, sym, old);
@@ -1299,11 +1318,8 @@ void tb_linker_mark_live(TB_Linker* l) {
     cuikperf_region_end();
 
     cuikperf_region_start("mark", NULL);
-    size_t cnt = 0;
     while (dyn_array_length(l->worklist)) {
         TB_LinkerSectionPiece* p = dyn_array_pop(l->worklist);
-        cnt++;
-
         // printf("Walk: %#llx (%zu, %.*s)\n", p->order, p->reloc_count, (int) p->obj->name.length, p->obj->name.data);
 
         // associated section
@@ -1370,7 +1386,5 @@ void tb_linker_mark_live(TB_Linker* l) {
         }
     }
     cuikperf_region_end();
-
-    printf("Pieces: %zu\n", cnt);
 }
 

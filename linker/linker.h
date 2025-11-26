@@ -306,6 +306,7 @@ typedef struct TB_Linker {
     // Post layout info:
     DynArray(TB_LinkerSection*) sections_arr;
     DynArray(TB_LinkerSegment*) segments;
+    DynArray(ImportTable*) sorted_imports;
 
     // During symbol inflation, it'll represent which TB_LinkerObject* are waiting to be parsed.
     // During Mark-Live, we track which TB_LinkerSectionPiece* have not been resolved yet.
