@@ -7,12 +7,72 @@
 #include <tb_coff.h>
 #include <file_map.h>
 
-enum { IMP_PREFIX_LEN = sizeof("__imp_") - 1 };
+enum {
+    IMP_PREFIX_LEN = sizeof("__imp_") - 1,
+    PDB_BLOCK_SIZE = 4096,
+};
 
 typedef struct {
     uint32_t offset;
     TB_LinkerSegment* segment;
 } PE_BaseReloc;
+
+// https://llvm.org/docs/PDB/MsfFile.html#the-stream-directory
+typedef struct {
+    char file_magic[32];
+    uint32_t block_size;
+    uint32_t free_block_map_block;
+    uint32_t num_blocks;
+    uint32_t num_directory_bytes;
+    uint32_t unknown;
+    uint32_t dir_blocks[];
+} PDB_SuperBlock;
+
+// serialized form
+typedef struct {
+    uint32_t version;
+    uint32_t signature;
+    uint32_t age;
+    uint32_t unique_id[4];
+} PDB_InfoHeader;
+
+// https://llvm.org/docs/PDB/DbiStream.html
+typedef struct {
+    // I have no idea why they didn't make this
+    // part of the streams consistent btw. Info
+    // does ver+sign+age, here it's sign+ver+age
+    uint32_t signature;
+    uint32_t version;
+    uint32_t age;
+
+    uint16_t global_stream; // StreamIndex
+    uint16_t build_num;
+
+    uint16_t public_stream; // StreamIndex
+    uint16_t pdb_dll_version;
+    uint16_t sym_record_stream; // StreamIndex
+    uint16_t pdb_dll_rebuild;
+    uint32_t mod_info_size;
+    uint32_t section_contrib_size;
+    uint32_t section_map_size;
+    uint32_t source_info_size;
+    uint32_t type_server_size;
+    uint32_t mfc_type_server; // StreamIndex
+    uint32_t optional_debug_header_size;
+    uint32_t ec_subsystem_size;
+
+    uint16_t flags;
+    uint16_t machine;
+
+    uint32_t pad;
+    uint8_t data[];
+} PDB_DBIHeader;
+
+typedef struct {
+    size_t size;
+    // We assume that all blocks are contiguous for now
+    size_t first_block;
+} DebugStream;
 
 typedef struct {
     TB_Linker* linker;
@@ -427,11 +487,6 @@ void pe_append_object(TPool* pool, void** args) {
 
     uint64_t order = obj->time;
     CUIK_TIMED_BLOCK("parse sections") {
-        if (strsuffix(obj->name.data, "api-ms-win-core-calendar-l1-1-0.dll", obj->name.length)) {
-            assert(parser.section_count != 0);
-            printf("ZZZ %zu\n", parser.section_count);
-        }
-
         FOR_N(i, 0, parser.section_count) {
             TB_ObjectSection* restrict s = &sections[i];
             tb_coff_parse_section(&parser, i, s);
@@ -477,10 +532,6 @@ void pe_append_object(TPool* pool, void** args) {
                     // assert(pdata_piece == NULL);
                     pdata_piece = p;
                 }
-            }
-
-            if (strsuffix(obj->name.data, "api-ms-win-core-calendar-l1-1-0.dll", obj->name.length)) {
-                printf("AAA %.*s %#x\n", (int) s->name.length, s->name.data, p->flags);
             }
         }
     }
@@ -1195,6 +1246,8 @@ static DynArray(PE_BaseReloc) find_base_relocs(TB_Linker* l) {
     return base_relocs;
 }
 
+#define WRITE8(data)  (output[write_pos++] = (data))
+#define WRITE32(data) (memcpy(&output[write_pos], &(uint32_t){ data }, 4), write_pos += (4))
 #define WRITE(data, size) (memcpy(&output[write_pos], data, size), write_pos += (size))
 static bool pe_export(TB_Linker* l, const char* file_name) {
     cuikperf_region_start("linker", NULL);
@@ -1538,9 +1591,113 @@ static bool pe_export(TB_Linker* l, const char* file_name) {
         close_file_map(&fm);
     }
 
+    CUIK_TIMED_BLOCK("pdb output") {
+        DynArray(DebugStream*) streams = dyn_array_create(DebugStream*, 8);
+        FOR_N(i, 0, 6) {
+            DebugStream* s = tb_arena_alloc(&linker_perm_arena, sizeof(DebugStream));
+            s->size = 0;
+            if (i == 1) {
+                s->size = 71; // Info stream
+            } else if (i == 3) {
+                s->size = sizeof(PDB_DBIHeader);
+            }
+            dyn_array_put(streams, s);
+        }
+
+        size_t blocks_needed = 5;
+        dyn_array_for(i, streams) {
+            streams[i]->first_block = blocks_needed;
+            blocks_needed += (streams[i]->size + PDB_BLOCK_SIZE - 1) / PDB_BLOCK_SIZE;
+        }
+
+        // 0          1     2     3    4       5      6       7     8
+        // Superblock Free0 Free1 Dirs Headers Block Block Block Block
+        size_t pdb_size = blocks_needed*PDB_BLOCK_SIZE;
+        FileMap fm = open_file_map_write("a.pdb", pdb_size);
+        if (fm.data == NULL) {
+            printf("tblink: could not open file! %s", "a.pdb");
+            return false;
+        }
+
+        size_t write_pos = 0;
+        uint8_t* output = fm.data;
+
+        PDB_SuperBlock super = {
+            .file_magic = "Microsoft C/C++ MSF 7.00\r\n\x1A\x44\x53\0\0",
+            .block_size = PDB_BLOCK_SIZE,
+            .free_block_map_block = 1,
+            .num_blocks = blocks_needed,
+            .num_directory_bytes = 4 + dyn_array_length(streams)*8,
+        };
+
+        // SuperBlock + directory page blocks
+        WRITE(&super, sizeof(super));
+        WRITE32(3);
+
+        // Block3: Directory
+        write_pos = 3*PDB_BLOCK_SIZE;
+        WRITE32(4);
+
+        // Block4: Stream Headers
+        write_pos = 4*PDB_BLOCK_SIZE;
+        WRITE32(dyn_array_length(streams));
+        dyn_array_for(i, streams) { WRITE32(streams[i]->size); }
+        dyn_array_for(i, streams) {
+            size_t block_count = (streams[i]->size + PDB_BLOCK_SIZE - 1) / PDB_BLOCK_SIZE;
+            FOR_N(j, 0, block_count) {
+                WRITE32(streams[i]->first_block + j);
+            }
+        }
+
+        dyn_array_for(i, streams) {
+            size_t start = write_pos = streams[i]->first_block*PDB_BLOCK_SIZE;
+            if (i == 1) {
+                PDB_InfoHeader stream = {
+                    .version = 20000404, // VC70
+                };
+                WRITE(&stream, sizeof(stream));
+
+                // PDB Names streams
+                WRITE32(sizeof("/names"));
+                WRITE("/names", sizeof("/names"));
+
+                // https://llvm.org/docs/PDB/HashTable.html
+                //   There's a really weird hash map stuffed here rather than
+                //   some direct stream indices but whatever, my job isn't to
+                //   question microsoft, that's a hobby, my job is to put up
+                //   with microsoft.
+                //
+                // Size & Capacity
+                WRITE32(1);
+                WRITE32(1);
+                // Present Bit Vector
+                WRITE32(1);
+                WRITE32(1);
+                // Deleted Bit Vector
+                WRITE32(1);
+                WRITE32(0);
+                // Entries
+                WRITE32(0);
+                WRITE32(5);
+            } else if (i == 3) {
+                PDB_DBIHeader stream = {
+                    .signature = -1,
+                    .version = 19990903, // VC70
+                    .machine = 0xD0,
+                };
+                WRITE(&stream, sizeof(stream));
+            }
+            assert(write_pos - start == streams[i]->size);
+        }
+
+        close_file_map(&fm);
+    }
+
     cuikperf_region_end();
     return true;
 }
+#undef WRITE32
+#undef WRITE8
 #undef WRITE
 
 TB_LinkerVtbl tb__linker_pe = {

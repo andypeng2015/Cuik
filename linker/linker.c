@@ -1018,7 +1018,6 @@ bool tb_linker_layout(TB_Linker* l) {
     DynArray(TB_LinkerSection*) sections = NULL;
     CUIK_TIMED_BLOCK("sort sections") {
         size_t num = 0;
-
         nbhs_for(e, &l->sections) {
             TB_LinkerSection* s = *e;
             if (s->generic_flags & TB_LINKER_SECTION_DISCARD) {
@@ -1041,7 +1040,7 @@ bool tb_linker_layout(TB_Linker* l) {
                     }
                 }
 
-                // printf("%.*s: %zu -> %zu\n", (int) s->name.length, s->name.data, piece_count, j);
+                // printf("%.*s: %zu -> %zu\n", (int) s->name.length, s->name.data, piece_count, dyn_array_length(array_form));
             }
 
             if (dyn_array_length(array_form) == 0) {
@@ -1268,11 +1267,6 @@ void tb_linker_push_named(TB_Linker* l, const char* name) {
 }
 
 bool tb_linker_push_piece(TB_Linker* l, TB_LinkerSectionPiece* p) {
-    static const char sss[] = "api-ms-win-core-calendar-l1-1-0.dll";
-    if (p->obj->name.length == sizeof(sss)-1 && memcmp((const char*) p->obj->name.data, sss, sizeof(sss)-1) == 0) {
-        __debugbreak();
-    }
-
     if (p->size == 0 || (p->flags & TB_LINKER_PIECE_LIVE) || (p->parent->generic_flags & TB_LINKER_SECTION_DISCARD)) {
         return false;
     }
