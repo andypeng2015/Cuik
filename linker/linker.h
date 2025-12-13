@@ -43,6 +43,13 @@ struct TB_LinkerObject {
 
     // matters if we're doing lazy loading
     _Atomic bool loaded;
+
+    // Some section piece was marked that is contained by this object
+    _Atomic bool live;
+
+    // Windows-specific debug stuff
+    TB_LinkerSectionPiece* debug_s;
+    TB_LinkerSectionPiece* debug_t;
 };
 
 typedef enum {
@@ -295,7 +302,7 @@ typedef struct TB_Linker {
     NBHS sections; // TB_LinkerSection*
     NBHS imports;  // ImportTable*
     // tracking the linker objects
-    NBHS objects; // TB_LinkerObject*
+    NBHS objects;  // TB_LinkerObject*
 
     // sometimes people ask to import
     // the same libs a bunch of times.

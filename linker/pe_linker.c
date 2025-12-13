@@ -65,8 +65,35 @@ typedef struct {
     uint16_t machine;
 
     uint32_t pad;
-    uint8_t data[];
+    uint8_t data[]; // PDB_ModuleInfo[]
 } PDB_DBIHeader;
+
+// https://llvm.org/docs/PDB/DbiStream.html
+typedef struct {
+    uint32_t unused1;
+    struct {
+        uint16_t section;
+        char     padding1[2];
+        int32_t  offset;
+        int32_t  size;
+        uint32_t characteristics;
+        uint16_t module_index;
+        char     padding2[2];
+        uint32_t data_crc;
+        uint32_t reloc_crc;
+    } section_contr;
+    uint16_t flags;
+    uint16_t module_sym_stream;
+    uint32_t sym_size;
+    uint32_t c11_size;
+    uint32_t c13_size;
+    uint16_t source_file_count;
+    char     padding[2];
+    uint32_t unused2;
+    uint32_t source_file_name_index;
+    uint32_t pdb_file_path_name_index;
+    char     module_name[];
+} PDB_ModuleInfo;
 
 typedef struct {
     size_t size;
@@ -531,6 +558,10 @@ void pe_append_object(TPool* pool, void** args) {
                 } else if (dollar == 6 && memcmp(s->name.data, ".pdata", 6) == 0) {
                     // assert(pdata_piece == NULL);
                     pdata_piece = p;
+                } else if (s->name.length == 8 && memcmp(s->name.data, ".debug$S", 8) == 0) {
+                    obj->debug_s = p;
+                } else if (s->name.length == 8 && memcmp(s->name.data, ".debug$T", 8) == 0) {
+                    obj->debug_t = p;
                 }
             }
         }
@@ -1247,6 +1278,7 @@ static DynArray(PE_BaseReloc) find_base_relocs(TB_Linker* l) {
 }
 
 #define WRITE8(data)  (output[write_pos++] = (data))
+#define WRITE16(data) (memcpy(&output[write_pos], &(uint16_t){ data }, 2), write_pos += (2))
 #define WRITE32(data) (memcpy(&output[write_pos], &(uint32_t){ data }, 4), write_pos += (4))
 #define WRITE(data, size) (memcpy(&output[write_pos], data, size), write_pos += (size))
 static bool pe_export(TB_Linker* l, const char* file_name) {
@@ -1272,6 +1304,7 @@ static bool pe_export(TB_Linker* l, const char* file_name) {
         namehs_resize_barrier(&l->symbols);
         namehs_resize_barrier(&l->sections);
         namehs_resize_barrier(&l->imports);
+        namehs_resize_barrier(&l->objects);
     }
 
     // this will resolve the sections, GC any pieces which aren't used and
@@ -1592,6 +1625,19 @@ static bool pe_export(TB_Linker* l, const char* file_name) {
     }
 
     CUIK_TIMED_BLOCK("pdb output") {
+        // Collect all modules
+        DynArray(TB_LinkerObject*) sorted_objs = dyn_array_create(TB_LinkerObject*, 8);
+        nbhs_for(e, &l->objects) {
+            TB_LinkerObject* obj = *e;
+            if (obj->live && obj->name.data[obj->name.length - 1] != '/') {
+                if (obj->name.length < 4 || memcmp(&obj->name.data[obj->name.length - 4], ".dll", 4) != 0) {
+                    dyn_array_put(sorted_objs, obj);
+                }
+            }
+        }
+        qsort(sorted_objs, dyn_array_length(sorted_objs), sizeof(TB_LinkerObject*), compare_name);
+        // dyn_array_set_length(sorted_objs, 100);
+
         DynArray(DebugStream*) streams = dyn_array_create(DebugStream*, 8);
         FOR_N(i, 0, 6) {
             DebugStream* s = tb_arena_alloc(&linker_perm_arena, sizeof(DebugStream));
@@ -1603,6 +1649,28 @@ static bool pe_export(TB_Linker* l, const char* file_name) {
             }
             dyn_array_put(streams, s);
         }
+
+        size_t mod_info_size = 0;
+        dyn_array_for(i, sorted_objs) {
+            TB_LinkerObject* obj = sorted_objs[i];
+
+            DebugStream* s = tb_arena_alloc(&linker_perm_arena, sizeof(DebugStream));
+            s->size = 0;
+            dyn_array_put(streams, s);
+
+            mod_info_size += sizeof(PDB_ModuleInfo);
+            mod_info_size += obj->name.length + 1;
+            if (obj->parent) {
+                mod_info_size += obj->parent->name.length + 1;
+            } else {
+                mod_info_size += obj->name.length + 1;
+            }
+            mod_info_size = (mod_info_size + 3) & ~3;
+        }
+
+        // DBI
+        streams[3]->size += mod_info_size;
+        streams[3]->size += sizeof(uint16_t[2]) + dyn_array_length(sorted_objs)*sizeof(uint16_t[2]);
 
         size_t blocks_needed = 5;
         dyn_array_for(i, streams) {
@@ -1684,8 +1752,43 @@ static bool pe_export(TB_Linker* l, const char* file_name) {
                     .signature = -1,
                     .version = 19990903, // VC70
                     .machine = 0xD0,
+                    .mod_info_size = mod_info_size,
+                    .source_info_size = sizeof(uint16_t[2]) + dyn_array_length(sorted_objs)*sizeof(uint16_t[2]),
                 };
                 WRITE(&stream, sizeof(stream));
+
+                dyn_array_for(i, sorted_objs) {
+                    TB_LinkerObject* obj = sorted_objs[i];
+                    PDB_ModuleInfo mod = {
+                        .module_sym_stream = 6 + i,
+                    };
+                    WRITE(&mod, sizeof(mod));
+
+                    WRITE(obj->name.data, obj->name.length);
+                    WRITE8(0);
+                    if (obj->parent) {
+                        WRITE(obj->parent->name.data, obj->parent->name.length);
+                        WRITE8(0);
+                    } else {
+                        WRITE(obj->name.data, obj->name.length);
+                        WRITE8(0);
+                    }
+
+                    int next = (write_pos + 3) & ~3;
+                    while (write_pos < next) { WRITE8(0); }
+                }
+
+                // Source File info
+                WRITE16(dyn_array_length(sorted_objs));
+                WRITE16(0);
+
+                dyn_array_for(i, sorted_objs) {
+                    WRITE16(i);
+                }
+
+                dyn_array_for(i, sorted_objs) {
+                    WRITE16(0);
+                }
             }
             assert(write_pos - start == streams[i]->size);
         }
@@ -1697,6 +1800,7 @@ static bool pe_export(TB_Linker* l, const char* file_name) {
     return true;
 }
 #undef WRITE32
+#undef WRITE16
 #undef WRITE8
 #undef WRITE
 

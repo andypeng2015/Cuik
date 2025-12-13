@@ -780,10 +780,9 @@ Token lexer_read(Lexer* restrict l) {
             goto retry;
         } else if (current[0] == '/' && current[1] == '*') {
             current += 2;
-
             // skip until comment end
             while (current[0] && !(current[0] == '*' && current[1] == '/')) {
-                t.hit_line |= *current++ == '\n';
+                current++; // t.hit_line |= *current++ == '\n';
             }
 
             current += 2;

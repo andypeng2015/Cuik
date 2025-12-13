@@ -1314,6 +1314,10 @@ void tb_linker_mark_live(TB_Linker* l) {
     cuikperf_region_start("mark", NULL);
     while (dyn_array_length(l->worklist)) {
         TB_LinkerSectionPiece* p = dyn_array_pop(l->worklist);
+        if (p->obj) {
+            atomic_store_explicit(&p->obj->live, true, memory_order_relaxed);
+        }
+
         // printf("Walk: %#llx (%zu, %.*s)\n", p->order, p->reloc_count, (int) p->obj->name.length, p->obj->name.data);
 
         // associated section
