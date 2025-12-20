@@ -185,7 +185,7 @@ static void apply_func(TB_Function* f, void* arg) {
     bool print_asm = args->assembly;
 
     const char* name = ((TB_Symbol*) f)->name;
-    if (0 && strcmp(name, "func_81") != 0) {
+    if (strcmp(name, "func_5") != 0) {
         return;
     }
 
