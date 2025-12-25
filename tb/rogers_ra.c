@@ -170,7 +170,7 @@ static double rogers_get_spill_cost(Ctx* restrict ctx, Rogers* restrict ra, VReg
 
 static void rogers_print_vreg(Ctx* restrict ctx, Rogers* restrict ra, VReg* vreg) {
     double cost = rogers_get_spill_cost(ctx, ra, vreg);
-    printf("# V%-4"PRIdPTR" cost=%.2f ", vreg - ctx->vregs, cost);
+    printf("# V%-4"PRIdPTR" cost=%.2f area=%lu bias=%.2f ", vreg - ctx->vregs, cost, vreg->area, vreg->spill_bias);
     tb__print_regmask(&OUT_STREAM_DEFAULT, vreg->mask);
     printf("\n");
 }
@@ -427,8 +427,8 @@ static void rogers_dump_split(Ctx* restrict ctx, Rogers* restrict ra, TB_BasicBl
 
 // mark program point as HRP
 static void mark_point_as_hrp(Ctx* ctx, Rogers* ra, TB_Node* n, int reg_class) {
-    TB_ASSERT(reg_class > 0);
-    TB_OPTDEBUG(REGALLOC6)(printf("#       %%%u is considered HRP\n", gvn));
+    // TB_ASSERT(reg_class > 0);
+    TB_OPTDEBUG(REGALLOC6)(printf("#       %%%u is considered HRP\n", n->gvn));
 
     uint32_t gvn = n->gvn;
     TB_BasicBlock* bb = ctx->f->scheduled[gvn];
@@ -840,6 +840,11 @@ void tb__rogers(Ctx* restrict ctx, TB_Arena* arena) {
         TB_OPTDEBUG(REGALLOC)(printf("# ========= Round %d =========\n", rounds));
         TB_ASSERT(rounds < 50);
 
+        /* tb_opt__REGALLOC  = rounds >= 10;
+        tb_opt__REGALLOC3 = rounds >= 10;
+        tb_opt__REGALLOC5 = rounds >= 10;
+        tb_opt__REGALLOC6 = rounds >= 10; */
+
         // reset HRP regions
         FOR_N(i, 0, ctx->bb_count) {
             FOR_N(j, 1, ctx->num_classes) {
@@ -991,12 +996,13 @@ void tb__rogers(Ctx* restrict ctx, TB_Arena* arena) {
 
         size_t num_spills = dyn_array_length(ra.splits);
         if (num_spills) {
-            /* if (rounds == 1) {
-                printf("AAA %d %zu\n", rounds, num_spills);
-            } else {
-                printf("AAA %d %zu (%+d)\n", rounds, num_spills, (int)num_spills - (int)last_spills);
+            int dt = (int)num_spills - (int)last_spills;
+            if (rounds == 1) {
+                dt = 0;
             }
-            last_spills = num_spills;*/
+
+            printf("AAA %-3d %zu (\x1b[%dm%+d\x1b[0m), %u\n", rounds, num_spills, dt < 0 ? 32 : 31, dt, aarray_length(ctx->vregs));
+            last_spills = num_spills;
 
             // reset assignment, but don't try to split them this round
             if (num_spills > 64) {
@@ -1031,7 +1037,9 @@ void tb__rogers(Ctx* restrict ctx, TB_Arena* arena) {
     }
 }
 
-TB_OPTDEBUG(STATS)(static int stats_c = 0);
+#if TB_OPTDEBUG_STATS
+static int stats_c = 0;
+#endif
 
 static uint32_t inactive_hash_index(uint64_t key) {
     const uint8_t* data = (uint8_t*) &key;
@@ -1044,18 +1052,24 @@ static uint32_t inactive_hash_index(uint64_t key) {
 
 static int last_use_in_bb(TB_BasicBlock* blocks, TB_BasicBlock** scheduled, Rogers* restrict ra, TB_BasicBlock* bb, TB_Node* n, uint32_t n_gvn) {
     // printf("Last use in BB0 for %%%u: ", n->gvn);
-    TB_OPTDEBUG(STATS)(stats_c++);
+    #if TB_OPTDEBUG_STATS
+    stats_c++;
+    #endif
 
     uint64_t key = n_gvn | ((bb - blocks) << 32ull);
     int hash_index = inactive_hash_index(key);
     TB_ASSERT(hash_index < 128);
     if (ra->inactive_cache && ra->inactive_cache[hash_index].key == key) {
-        // printf(" Hit!\n");
-        TB_OPTDEBUG(STATS)(stats_hit += 1);
+        #if TB_OPTDEBUG_STATS
+        stats_hit += 1;
+        #endif
+
         return ra->inactive_cache[hash_index].last_use;
     }
 
-    TB_OPTDEBUG(STATS)(stats_miss += 1);
+    #if TB_OPTDEBUG_STATS
+    stats_miss += 1;
+    #endif
 
     // printf(" Miss.\n");
     int l = 1;
@@ -1179,6 +1193,8 @@ static SplitDecision choose_best_spill(Ctx* restrict ctx, Rogers* restrict ra, T
         }
     }
 
+    TB_OPTDEBUG(REGALLOC)(printf("\n\n"));
+
     int best_spill = 0;
     int best_gvn = 0;
     float best_score = INFINITY;
@@ -1186,7 +1202,7 @@ static SplitDecision choose_best_spill(Ctx* restrict ctx, Rogers* restrict ra, T
         int gvn = ra->potential_spills[i];
 
         TB_ASSERT(ctx->vreg_map[gvn] > 0);
-        VReg* vreg  = &ctx->vregs[ctx->vreg_map[gvn]];
+        VReg* vreg = &ctx->vregs[ctx->vreg_map[gvn]];
 
         // we'll only spill things which can make aggressive forward progress
         if (attempted_vreg->was_spilled && !within_reg_mask(useful_mask, vreg->assigned)) {
@@ -1207,7 +1223,7 @@ static SplitDecision choose_best_spill(Ctx* restrict ctx, Rogers* restrict ra, T
             best_score = score;
             best_spill = ctx->vreg_map[gvn];
             best_gvn = gvn;
-        } else {
+        } else if (score != INFINITY) {
             TB_OPTDEBUG(REGALLOC)(printf("#     %%%u is a bad pick! %f\n", gvn, score));
         }
     }
@@ -1261,13 +1277,13 @@ static bool allocate_reg(Ctx* ctx, Rogers* ra, TB_Node* n) {
         return true;
     }
 
-    #if TB_OPTDEBUG_REGALLOC5
-    printf("#\n");
-    rogers_print_vreg(ctx, ra, vreg);
-    printf("# ");
-    tb_print_dumb_node(NULL, n);
-    printf("\n");
-    #endif
+    IF_OPT(REGALLOC5) {
+        printf("#\n");
+        rogers_print_vreg(ctx, ra, vreg);
+        printf("# ");
+        tb_print_dumb_node(NULL, n);
+        printf("\n");
+    }
 
     int def_class = vreg->mask->class;
     int num_regs = def_class == REG_CLASS_STK ? ra->num_spills : ctx->num_regs[def_class];
@@ -1526,23 +1542,21 @@ static void compute_areas(Ctx* restrict ctx, Rogers* restrict ra, TB_Arena* aren
                     array[n->gvn] = -1;
                 }
 
-                TB_OPTDEBUG(REGALLOC_AREA)(printf("# "));
-
-                // accumulate area (don't do so on projections and temps)
-                if (n->type != TB_MACH_TEMP && !IS_PROJ(n)) {
-                    aarray_for(k, stack) {
-                        TB_ASSERT(ctx->vreg_map[stack[k]] > 0);
-                        VReg* v = &ctx->vregs[ctx->vreg_map[stack[k]]];
-                        v->area += freq;
-
-                        TB_OPTDEBUG(REGALLOC_AREA)(printf("%%%u ", stack[k]));
-                    }
-                }
-
-                TB_OPTDEBUG(REGALLOC_AREA)(printf("\n"));
-
-                // start intervals
                 if (n->type != TB_PHI) {
+                    // accumulate area (don't do so on projections and temps)
+                    if (n->type != TB_MACH_TEMP && !IS_PROJ(n)) {
+                        TB_OPTDEBUG(REGALLOC_AREA)(printf("# %%%u: ", n->gvn));
+                        aarray_for(k, stack) {
+                            TB_ASSERT(ctx->vreg_map[stack[k]] > 0);
+                            VReg* v = &ctx->vregs[ctx->vreg_map[stack[k]]];
+                            v->area += freq;
+
+                            TB_OPTDEBUG(REGALLOC_AREA)(printf("%%%u ", stack[k]));
+                        }
+                        TB_OPTDEBUG(REGALLOC_AREA)(printf("\n"));
+                    }
+
+                    // start intervals
                     FOR_N(k, 1, n->input_count) {
                         TB_Node* in = n->inputs[k];
                         if (in && ctx->vreg_map[in->gvn] > 0) {

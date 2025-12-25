@@ -669,7 +669,10 @@ static void cprop_cause_splits(TB_Function* f, CProp* cprop) {
         for (CProp_Node* node = p->members; node; node = node->next) {
             TB_Node* x = node->n;
 
-            TB_OPTDEBUG(STATS)(uint64_t start = cuik_time_in_nanos());
+            #if TB_OPTDEBUG_STATS
+            uint64_t start = cuik_time_in_nanos();
+            #endif
+
             FOR_USERS(u, x) {
                 TB_Node* y = USERN(u);
                 CProp_Node* y_node = cprop->nodes[y->gvn];
@@ -718,7 +721,12 @@ static void cprop_cause_splits(TB_Function* f, CProp* cprop) {
                     }
                 }
             }
-            TB_OPTDEBUG(STATS)(x->type < TB_NODE_TYPE_MAX ? (f->stats.cprop_t[x->type] += x->user_count, 0) : 0); // (cuik_time_in_nanos() - start), 0) : 0);
+
+            #if TB_OPTDEBUG_STATS
+            if (x->type < TB_NODE_TYPE_MAX) {
+                f->stats.cprop_t[x->type] += x->user_count;
+            }
+            #endif
         }
         // cuikperf_region_end();
         // printf("\n\n\n");
@@ -999,7 +1007,10 @@ int tb_opt_cprop_rewrite(TB_Function* f) {
 
         TB_Node* k = try_as_const(f, n, latuni_get(f, n));
         if (k != NULL) {
-            TB_OPTDEBUG(STATS)(inc_nums(f->stats.opto_constants, n->type));
+            #if TB_OPTDEBUG_STATS
+            inc_nums(f->stats.opto_constants, n->type);
+            #endif
+
             TB_OPTLOG(SCCP, printf(" => "), tb_print_dumb_node(NULL, k), printf(" (CONST)\n"));
 
             node->n = k;

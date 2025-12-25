@@ -3,6 +3,15 @@
 #include "host.h"
 #include <hashes.h>
 
+#ifdef NDEBUG
+#define ON_DBG(name, def)
+#else
+#define ON_DBG(name, def) bool tb_opt__ ## name = def;
+#endif
+
+#define ON_REL(name, def)
+#include "tb_config.h"
+
 #ifndef TB_NO_THREADS
 static once_flag tb_global_init = ONCE_FLAG_INIT;
 #else

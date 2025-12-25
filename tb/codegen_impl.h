@@ -71,7 +71,7 @@ static void dump_stack_layout(Ctx* restrict ctx, TB_CGEmitter* e);
 // just a pretty asm-like printer
 static void print_pretty(Ctx* restrict ctx, TB_Node* n);
 
-TB_OPTDEBUG(STATS)(int stats_miss, stats_hit);
+int stats_miss, stats_hit;
 
 typedef struct {
     TB_Node* n;
@@ -1266,7 +1266,9 @@ static void compile_function(TB_Function* restrict f, TB_CodegenRA ra, TB_Functi
     log_debug("%s: code_arena=%.1f KiB", f->super.name, tb_arena_current_size(code_arena) / 1024.0f);
     #endif
 
-    TB_OPTDEBUG(STATS)(printf("%f miss rate (%d misses, %d hits)\n", stats_miss / (float) (stats_miss + stats_hit), stats_miss, stats_hit));
+    #if TB_OPTDEBUG_STATS
+    printf("%f miss rate (%d misses, %d hits)\n", stats_miss / (float) (stats_miss + stats_hit), stats_miss, stats_hit));
+    #endif
 
     tb_arena_clear(&f->tmp_arena);
 

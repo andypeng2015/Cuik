@@ -1199,9 +1199,13 @@ static TB_Node* peephole(TB_Function* f, TB_Node* n, bool see_users) {
     // but in practice we should only hit a node like once or twice)
     TB_NodeTypeEnum old_n_type = n->type;
     TB_Node* k = idealize(f, n);
-    DO_IF(TB_OPTDEBUG_PEEP)(int loop_count=0);
+
+    int loop_count = 0;
     while (k != NULL) {
-        DO_IF(TB_OPTDEBUG_STATS)(inc_nums(f->stats.rewrites, old_n_type));
+        #if TB_OPTDEBUG_STATS
+        inc_nums(f->stats.rewrites, old_n_type);
+        #endif
+
         TB_OPTLOG(PEEP, printf(" => \x1b[32m"), tb_print_dumb_node(NULL, k), printf("\x1b[0m"));
 
         // transfer users from n -> k
@@ -1219,7 +1223,7 @@ static TB_Node* peephole(TB_Function* f, TB_Node* n, bool see_users) {
         // try again, maybe we get another transformation
         old_n_type = n->type;
         k = idealize(f, n);
-        DO_IF(TB_OPTDEBUG_PEEP)(if (++loop_count > 5) { log_warn("%p: we looping a lil too much dawg...", n); });
+        TB_OPTDEBUG(PEEP)(if (++loop_count > 5) { log_warn("%p: we looping a lil too much dawg...", n); });
     }
 
     // idealize ops could kill a node
@@ -1268,7 +1272,10 @@ static TB_Node* peephole(TB_Function* f, TB_Node* n, bool see_users) {
             old_n_type = n->type;
             TB_Node* k = try_as_const(f, n, new_type);
             if (k && k != n) {
-                DO_IF(TB_OPTDEBUG_STATS)(inc_nums(f->stats.constants, old_n_type));
+                #if TB_OPTDEBUG_STATS
+                inc_nums(f->stats.constants, old_n_type);
+                #endif
+
                 TB_OPTLOG(PEEP, printf(" => \x1b[96m"), tb_print_dumb_node(NULL, k), printf("\x1b[0m\n"));
 
                 migrate_type(f, n, k);
@@ -1304,7 +1311,10 @@ static TB_Node* peephole(TB_Function* f, TB_Node* n, bool see_users) {
     old_n_type = n->type;
     k = identity(f, n);
     if (n != k) {
-        DO_IF(TB_OPTDEBUG_STATS)(inc_nums(f->stats.identities, old_n_type));
+        #if TB_OPTDEBUG_STATS
+        inc_nums(f->stats.identities, old_n_type);
+        #endif
+
         TB_OPTLOG(PEEP, printf(" => \x1b[33m"), tb_print_dumb_node(NULL, k), printf("\x1b[0m\n"));
 
         if (n->type == TB_PHI) {
@@ -1318,28 +1328,17 @@ static TB_Node* peephole(TB_Function* f, TB_Node* n, bool see_users) {
         return k;
     }
 
-    // global value numbering
-    #if TB_OPTDEBUG_GVN
-    DynArray(TB_Node*) arr = dyn_array_create(TB_Node*, 64);
-    nl_hashset_for(p, &f->gvn_nodes) {
-        dyn_array_put(arr, *p);
-    }
-    qsort(arr, dyn_array_length(arr), sizeof(TB_Node*), node_sort_cmp);
-    dyn_array_for(i, arr) {
-        printf("  * ");
-        tb_print_dumb_node(NULL, arr[i]);
-        if (gvn_compare(arr[i], n)) {
-            printf(" <-- HERE");
-        }
-        printf(" (hash=%#x)\n", gvn_hash(arr[i]));
-    }
-    #endif
-
     if (can_gvn(n)) {
-        DO_IF(TB_OPTDEBUG_STATS)(f->stats.gvn_tries++);
+        #if TB_OPTDEBUG_STATS
+        f->stats.gvn_tries++;
+        #endif
+
         k = nl_hashset_put2(&f->gvn_nodes, n, gvn_hash, gvn_compare);
         if (k && (k != n)) {
-            DO_IF(TB_OPTDEBUG_STATS)(f->stats.gvn_hit++);
+            #if TB_OPTDEBUG_STATS
+            f->stats.gvn_hit++;
+            #endif
+
             TB_OPTLOG(PEEP, printf(" => \x1b[95mGVN %%%u\x1b[0m\n", k->gvn));
 
             migrate_type(f, n, k);
@@ -1399,7 +1398,10 @@ int tb_opt_peeps(TB_Function* f) {
             }
 
             if (!IS_PROJ(n) && n->user_count == 0) {
-                DO_IF(TB_OPTDEBUG_STATS)(inc_nums(f->stats.killed, n->type));
+                #if TB_OPTDEBUG_STATS
+                inc_nums(f->stats.killed, n->type);
+                #endif
+
                 TB_OPTLOG(PEEP, printf("PEEP t=%d? ", ++f->stats.time), tb_print_dumb_node(NULL, n));
                 TB_OPTLOG(PEEP, printf(" => \x1b[196mKILL\x1b[0m\n"));
                 if (n->type == TB_SYMBOL_TABLE) {
@@ -1480,7 +1482,9 @@ bool tb_opt(TB_Function* f, TB_Worklist* ws, bool preserve_types) {
             }
         }*/
 
-        TB_OPTDEBUG(STATS)(f->stats.initial = worklist_count(ws));
+        #if TB_OPTDEBUG_STATS
+        f->stats.initial = worklist_count(ws);
+        #endif
     }
     TB_OPTLOG(PEEP, log_debug("%s: pushed %d nodes (out of %d)", f->super.name, worklist_count(f->worklist), f->node_count));
 

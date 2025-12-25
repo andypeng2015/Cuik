@@ -256,8 +256,7 @@ struct Ctx {
 };
 
 // Rogers RA stats collection crap
-TB_OPTDEBUG(STATS)(extern int stats_miss, stats_hit);
-
+extern int stats_miss, stats_hit;
 extern RegMask TB_REG_EMPTY;
 
 void tb__rogers(Ctx* restrict ctx, TB_Arena* arena);

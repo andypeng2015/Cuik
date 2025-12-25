@@ -1005,6 +1005,10 @@ static bool node_remat(TB_Node* n) {
         return true;
     }
 
+    /* if (n->type == TB_x86_movsx8 || n->type == TB_x86_movzx8 || n->type == TB_x86_movzx16 || n->type == TB_x86_movzx16 || n->type == TB_x86_movsx32) {
+        return true;
+    } */
+
     return n->type == TB_x86_lea || n->type == TB_x86_cmp || n->type == TB_x86_test || n->type == TB_x86_ucomi || n->type == TB_x86_bt;
 }
 
@@ -1332,7 +1336,7 @@ static RegMask* node_constraint(Ctx* restrict ctx, TB_Node* n, RegMask** ins) {
         }
 
         case TB_ICONST:
-        return ctx->normie_mask[REG_CLASS_GPR];
+        return ctx->mayspill_mask[REG_CLASS_GPR];
 
         case TB_x86_vzero:
         return ctx->normie_mask[REG_CLASS_XMM];
