@@ -849,53 +849,45 @@ static void compile_function(TB_Function* restrict f, TB_CodegenRA ra, TB_Functi
     }
 
     CUIK_TIMED_BLOCK("gather RA constraints") {
-        #if TB_OPTDEBUG_REGALLOC
-        printf("====== PRE-RA %-20s ======\n", ctx.f->super.name);
-        #endif
+        IF_OPT(REGALLOC) {
+            printf("====== PRE-RA %-20s ======\n", ctx.f->super.name);
+        }
 
         FOR_N(i, 0, bb_count) {
             TB_BasicBlock* bb = &cfg.blocks[i];
 
-            #if TB_OPTDEBUG_REGALLOC
-            printf("BB %zu (freq=%.4f)\n", i, bb->freq);
-            #endif
-
+            TB_OPTDEBUG(REGALLOC)(printf("BB %zu (freq=%.4f)\n", i, bb->freq));
             aarray_for(j, bb->items) {
                 TB_Node* n = bb->items[j];
-
-                #if TB_OPTDEBUG_REGALLOC
-                printf("  "), tb_print_dumb_node(NULL, n), printf("\n");
-                #endif
+                TB_OPTDEBUG(REGALLOC)(printf("  "), tb_print_dumb_node(NULL, n), printf("\n"));
 
                 RegMask* def_mask = node_constraint(&ctx, n, ctx.ins);
                 int vreg_id = try_create_vreg(&ctx, n, def_mask);
 
-                #if TB_OPTDEBUG_REGALLOC
-                if (vreg_id > 0) {
-                    printf("    OUT    = "), tb__print_regmask(&OUT_STREAM_DEFAULT, def_mask), printf(" \x1b[32m# VREG=%d\x1b[0m\n", vreg_id);
-                }
+                IF_OPT(REGALLOC) {
+                    if (vreg_id > 0) {
+                        printf("    OUT    = "), tb__print_regmask(&OUT_STREAM_DEFAULT, def_mask), printf(" \x1b[32m# VREG=%d\x1b[0m\n", vreg_id);
+                    }
 
-                FOR_N(k, 1, n->input_count) {
-                    if (n->inputs[k]) {
-                        if (n->inputs[k]->type == TB_MACH_TEMP) {
-                            printf("    TMP[%zu] = ", k), tb__print_regmask(&OUT_STREAM_DEFAULT, ctx.ins[k]), printf(" %%%d\n", n->inputs[k]->gvn);
-                        } else if (ctx.ins[k] != &TB_REG_EMPTY) {
-                            printf("    IN[%zu]  = ", k), tb__print_regmask(&OUT_STREAM_DEFAULT, ctx.ins[k]), printf(" %%%d\n", n->inputs[k]->gvn);
+                    FOR_N(k, 1, n->input_count) {
+                        if (n->inputs[k]) {
+                            if (n->inputs[k]->type == TB_MACH_TEMP) {
+                                printf("    TMP[%zu] = ", k), tb__print_regmask(&OUT_STREAM_DEFAULT, ctx.ins[k]), printf(" %%%d\n", n->inputs[k]->gvn);
+                            } else if (ctx.ins[k] != &TB_REG_EMPTY) {
+                                printf("    IN[%zu]  = ", k), tb__print_regmask(&OUT_STREAM_DEFAULT, ctx.ins[k]), printf(" %%%d\n", n->inputs[k]->gvn);
+                            }
                         }
                     }
-                }
 
-                int kill_count = node_constraint_kill(&ctx, n, ctx.ins);
-                FOR_N(k, 0, kill_count) {
-                    printf("    KILL[%zu] = ", k), tb__print_regmask(&OUT_STREAM_DEFAULT, ctx.ins[k]), printf("\n");
+                    int kill_count = node_constraint_kill(&ctx, n, ctx.ins);
+                    FOR_N(k, 0, kill_count) {
+                        printf("    KILL[%zu] = ", k), tb__print_regmask(&OUT_STREAM_DEFAULT, ctx.ins[k]), printf("\n");
+                    }
                 }
-                #endif
             }
         }
 
-        #if TB_OPTDEBUG_REGALLOC
-        printf("=======================================\n");
-        #endif
+        TB_OPTDEBUG(REGALLOC)(printf("=======================================\n"));
     }
 
     CUIK_TIMED_BLOCK("regalloc") {
@@ -1267,7 +1259,7 @@ static void compile_function(TB_Function* restrict f, TB_CodegenRA ra, TB_Functi
     #endif
 
     #if TB_OPTDEBUG_STATS
-    printf("%f miss rate (%d misses, %d hits)\n", stats_miss / (float) (stats_miss + stats_hit), stats_miss, stats_hit));
+    printf("%f miss rate (%d misses, %d hits)\n", stats_miss / (float) (stats_miss + stats_hit), stats_miss, stats_hit);
     #endif
 
     tb_arena_clear(&f->tmp_arena);

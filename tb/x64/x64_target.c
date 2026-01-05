@@ -1336,7 +1336,7 @@ static RegMask* node_constraint(Ctx* restrict ctx, TB_Node* n, RegMask** ins) {
         }
 
         case TB_ICONST:
-        return ctx->mayspill_mask[REG_CLASS_GPR];
+        return ctx->normie_mask[REG_CLASS_GPR];
 
         case TB_x86_vzero:
         return ctx->normie_mask[REG_CLASS_XMM];
@@ -1992,13 +1992,11 @@ static void bundle_emit(Ctx* restrict ctx, TB_CGEmitter* e, Bundle* bundle) {
             Val dst = op_at(ctx, n);
             Val src = op_at(ctx, n->inputs[1]);
             if (!is_value_match(&dst, &src)) {
-                #if !TB_OPTDEBUG_REGALLOC2
                 if (dst.type == VAL_MEM && src.type != VAL_MEM) {
                     COMMENT("spill");
                 } else if (dst.type != VAL_MEM && src.type == VAL_MEM) {
                     COMMENT("reload");
                 }
-                #endif
 
                 if (dst.type == VAL_GPR && src.type == VAL_XMM) {
                     __(MOV_F2I, dt, &dst, &src);

@@ -21,6 +21,8 @@ typedef struct {
     RegMask** reload_mask;
 
     int* spill_vreg_id;
+    int* was_spilled;
+
     NL_Table spill_map;
 } RegSplitter;
 
@@ -153,14 +155,6 @@ static bool has_immediate_use(TB_Node* n, TB_Node* of) {
         if (n->inputs[i] == of) {
             return true;
         }
-    }
-    return false;
-}
-
-static bool is_spill_store(TB_Node* n) {
-    if (n->type == TB_MACH_COPY) {
-        TB_NodeMachCopy* cpy = TB_NODE_GET_EXTRA(n);
-        return reg_mask_is_stack(cpy->def);
     }
     return false;
 }
@@ -358,18 +352,17 @@ static void* arena_zalloc(TB_Arena* arena, size_t size) {
     return ptr;
 }
 
-static int bbb;
-static void tb__insert_splits(Ctx* ctx, Rogers* restrict ra) {
+static void tb__insert_splits(Ctx* ctx, Rogers* restrict ra, SplitDecision* splits, size_t num_spills) {
     TB_Arena* arena = ra->arena;
     TB_Function* f = ctx->f;
 
-    bbb++;
-    tb_opt__REGSPLIT = bbb >= 10;
+    // static int bbb;
+    // bbb++;
+    // tb_opt__REGSPLIT = bbb == 2; // bbb == 10 || bbb == 11;
 
     TB_OPTDEBUG(REGSPLIT)(printf("== INSERT NODES ==\n"));
 
     size_t old_node_count = f->node_count;
-    size_t num_spills = dyn_array_length(ra->splits);
 
     // we can only spill 64 vregs at once due to some bitsets i don't feel like changing
     TB_ASSERT(num_spills <= 64);
@@ -383,11 +376,12 @@ static void tb__insert_splits(Ctx* ctx, Rogers* restrict ra) {
     splitter.leaders = tb_arena_alloc(ra->arena, num_spills * sizeof(TB_Node*));
 
     splitter.spill_vreg_id = tb_arena_alloc(ra->arena, num_spills * sizeof(int));
+    splitter.was_spilled   = tb_arena_alloc(ra->arena, num_spills * sizeof(int));
 
     uint64_t was_spilled_before = 0;
     uint64_t class2vreg[MAX_REG_CLASSES] = { 0 };
     FOR_N(i, 0, num_spills) {
-        uint32_t vreg_id = ra->splits[i].target;
+        uint32_t vreg_id = splits[i].target;
 
         VReg* to_spill = &ctx->vregs[vreg_id];
         int class = to_spill->mask->class;
@@ -398,8 +392,8 @@ static void tb__insert_splits(Ctx* ctx, Rogers* restrict ra) {
         // don't ever need "splitting"
         TB_ASSERT(!reg_mask_is_stack(to_spill->mask));
         splitter.reload_mask[i] = ctx->normie_mask[class];
-        if (ra->splits[i].clobber) {
-            RegMask* clobber = ra->splits[i].clobber;
+        if (splits[i].clobber) {
+            RegMask* clobber = splits[i].clobber;
             TB_ASSERT(ctx->num_regs[clobber->class] < 64);
 
             uint64_t total_mask = UINT64_MAX >> (64 - ctx->num_regs[clobber->class]);
@@ -408,6 +402,7 @@ static void tb__insert_splits(Ctx* ctx, Rogers* restrict ra) {
             splitter.spill_mask[i] = ctx->mayspill_mask[class];
         }
         splitter.spill_vreg_id[i] = 0;
+        splitter.was_spilled[i]   = to_spill->was_spilled;
 
         if (to_spill->was_spilled) {
             was_spilled_before |= 1ull << i;
@@ -495,15 +490,15 @@ static void tb__insert_splits(Ctx* ctx, Rogers* restrict ra) {
     IF_OPT(REGSPLIT) {
         printf("== TO BE SPILLED ==\n");
         FOR_N(i, 0, num_spills) {
-            uint32_t vreg_id = ra->splits[i].target;
+            uint32_t vreg_id = splits[i].target;
             double cost = rogers_get_spill_cost(ctx, ra, &ctx->vregs[vreg_id]);
 
             printf("  V%-5u %f %lu", vreg_id, cost, ctx->vregs[vreg_id].area);
             if ((spill_aggro >> i) & 1) {
                 printf(" (SPILL AGGRO)");
             }
-            if ((was_spilled_before >> i) & 1) {
-                printf(" (SPILLED BEFORE)");
+            if (splitter.was_spilled[i]) {
+                printf(" (SPILLED %d TIMES)", splitter.was_spilled[i]);
             }
             if ((splitter.remat_all >> i) & 1) {
                 printf(" (REMAT HARD)");
@@ -519,13 +514,11 @@ static void tb__insert_splits(Ctx* ctx, Rogers* restrict ra) {
                 ctx->print_pretty(ctx, n);
                 printf(" (%d uses)\n", n->user_count);
 
-                /* if (n->gvn == 3194) {
-                    FOR_USERS(u, n) {
-                        printf("||  ");
-                        ctx->print_pretty(ctx, USERN(u));
-                        printf("\n");
-                    }
-                } */
+                /* FOR_USERS(u, n) {
+                    printf("||  ");
+                    ctx->print_pretty(ctx, USERN(u));
+                    printf("\n");
+                }*/
             }
         }
     }
@@ -1148,20 +1141,18 @@ static void tb__insert_splits(Ctx* ctx, Rogers* restrict ra) {
         TB_ASSERT(n->gvn < aarray_length(ctx->vreg_map));
         ctx->vreg_map[n->gvn] = 0;
 
-        #if TB_OPTDEBUG_REGSPLIT
-        printf("  ");
-        ctx->print_pretty(ctx, n);
-        printf("\n");
-        #endif
+        IF_OPT(REGSPLIT) {
+            printf("  ");
+            ctx->print_pretty(ctx, n);
+            printf("\n");
+        }
 
         // most of these nodes don't really have a bound set but whatever
         nl_table_remove(&ra->coalesce_set, (void*) (uintptr_t) (n->gvn + 1));
         i += 1;
     }
 
-    #if TB_OPTDEBUG_REGSPLIT
-    printf("\n");
-    #endif
+    TB_OPTDEBUG(REGSPLIT)(printf("\n"));
 
     // we can now aggressively coalesce nodes without
     // worry... unless it's a copy node, we assume those
@@ -1201,8 +1192,12 @@ static void tb__insert_splits(Ctx* ctx, Rogers* restrict ra) {
         TB_ASSERT(vreg_id == 0);
 
         VReg* new_vreg = tb__set_node_vreg(ctx, n);
-        new_vreg->was_spilled = true;
         ctx->vreg_map[leader] = new_vreg - ctx->vregs;
+
+        int spill = spill_map_get2(&splitter.spill_map, n);
+        if (spill >= 0) {
+            new_vreg->was_spilled = splitter.was_spilled[spill] + 1;
+        }
     }
 
     aarray_for(i, splitter.all_defs) {
@@ -1214,33 +1209,14 @@ static void tb__insert_splits(Ctx* ctx, Rogers* restrict ra) {
         if (n->gvn == leader) {
             VReg* vreg = &ctx->vregs[vreg_id];
             vreg->reg_width  = tb__reg_width_from_dt(mask->class, n->dt);
-            vreg->spill_bias = mask->may_spill ? -100.0f : 100.0f;
-
-            int spill = spill_map_get2(&splitter.spill_map, n);
-            TB_ASSERT(spill >= 0);
-
-            if (((was_spilled_before | spill_aggro) >> spill) & 1) {
-                vreg->spill_bias = 1e6;
-            }
+            vreg->spill_bias = mask->may_spill ? -100.0f : 0.0f;
         }
         mask = tb__reg_mask_meet(ctx, mask, ctx->vregs[vreg_id].mask);
-
-        /* if (vreg_id == 3148) {
-            printf("GGG V%d DEF%%%u ", vreg_id, n->gvn);
-            tb__print_regmask(&OUT_STREAM_DEFAULT, mask);
-            printf("\n");
-        } */
 
         FOR_USERS(u, n) {
             if (USERI(u) > 0 && USERI(u) < USERN(u)->input_count) {
                 RegMask* in_mask = constraint_in(ctx, USERN(u), USERI(u));
                 mask = tb__reg_mask_meet(ctx, mask, in_mask);
-
-                /* if (vreg_id == 3148) {
-                    printf("GGG V%d USE%%%u:%d ", vreg_id, USERN(u)->gvn, USERI(u));
-                    tb__print_regmask(&OUT_STREAM_DEFAULT, in_mask);
-                    printf("\n");
-                } */
             }
         }
 
@@ -1324,9 +1300,5 @@ static void tb__insert_splits(Ctx* ctx, Rogers* restrict ra) {
     nl_table_free(splitter.spill_map);
     TB_OPTDEBUG(SERVER)(dbg_submit_event_sched(&ctx->cfg, f, "Post-split"));
     TB_OPTDEBUG(REGSPLIT)(rogers_dump_sched(ctx, old_node_count));
-
-    if (bbb == 15) {
-        exit(0);
-    }
 }
 

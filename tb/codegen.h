@@ -102,7 +102,7 @@ struct VReg {
     // BRIGGS: when coalesced this number will go up
     int uses;
 
-    bool was_spilled : 1;
+    int  was_spilled : 2;
     bool was_reload  : 1;
 };
 
@@ -347,7 +347,12 @@ static double get_spill_cost(Ctx* restrict ctx, VReg* vreg) {
         return INFINITY;
     }
 
-    return vreg->spill_cost / vreg->area;
+    double score = vreg->spill_cost / vreg->area;
+    if (vreg->was_spilled == 2) {
+        score += 1e6;
+    }
+
+    return score;
 }
 
 static int op_reg_at(Ctx* ctx, TB_Node* n, int class) {
@@ -570,6 +575,14 @@ static int bits64_first_andn(uint64_t* A, uint64_t* B, size_t cnt) {
 
 static bool bits64_member(uint64_t* arr, size_t x) {
     return arr[x / 64] & (1ull << (x % 64));
+}
+
+static bool is_spill_store(TB_Node* n) {
+    if (n->type == TB_MACH_COPY) {
+        TB_NodeMachCopy* cpy = TB_NODE_GET_EXTRA(n);
+        return reg_mask_is_stack(cpy->def);
+    }
+    return false;
 }
 
 static bool is_gcref_dt(TB_DataType dt) {
