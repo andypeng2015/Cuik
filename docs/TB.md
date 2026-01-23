@@ -14,13 +14,13 @@ This is a summary of the current status of the optimizer and some places where I
 		* Loop rotation:
 			* Canonicalize loops such that they are unconditionally entered.
 			* Clone the first block of the first iteration, this involves duplicate the loop "gate" and then moving the original loop "gate" to the bottom of the loop.
-		* ==TODO: Loop idioms:==
+		* <mark>TODO: Loop idioms:</mark>
 			* Detect common loop patterns like memset, memcpy (probably others too).
-		* ==TODO Loop predicate hoisting:==
+		* <mark>TODO Loop predicate hoisting:</mark>
 			* If a check within the loop is always
-		* ==TODO: Loop Unrolling:==
+		* <mark>TODO: Loop Unrolling:</mark>
 			* We can clone the body of a loop to improve the ILP, which can increase the chances of being vectorized.
-		* ==TODO Loop splitting:==
+		* <mark>TODO Loop splitting:</mark>
 			* When choosing to vectorize a loop, we should divide the "misaligned" (either by address or trip count) into a scalar pre-loop.
 		* SLP
 		* Peepholes (again)
