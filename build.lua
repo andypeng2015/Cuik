@@ -207,7 +207,7 @@ local visited = {}
 local srcs    = {}
 local is_exe  = false
 
-local cflags = "-c -g -I include -I common"
+local cflags = "-c -g -I NBHM -I include -I common"
 -- Warnings
 cflags = cflags.." -Wall -Werror -Wno-unused -Wno-microsoft-enum-forward-reference -Wno-deprecated"
 
