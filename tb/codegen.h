@@ -577,6 +577,14 @@ static bool bits64_member(uint64_t* arr, size_t x) {
     return arr[x / 64] & (1ull << (x % 64));
 }
 
+static bool is_reload(TB_Node* n) {
+    if (n->type == TB_MACH_COPY) {
+        TB_NodeMachCopy* cpy = TB_NODE_GET_EXTRA(n);
+        return reg_mask_is_stack(cpy->use);
+    }
+    return false;
+}
+
 static bool is_spill_store(TB_Node* n) {
     if (n->type == TB_MACH_COPY) {
         TB_NodeMachCopy* cpy = TB_NODE_GET_EXTRA(n);

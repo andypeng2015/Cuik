@@ -105,6 +105,7 @@ static int last_use_in_bb(TB_BasicBlock* blocks, TB_BasicBlock** scheduled, Roge
 
 static bool foobar;
 static int stats_aaa;
+static int histo[10000];
 
 static TB_Node** coalesce_set_array(Ctx* ctx, Rogers* ra, TB_Node** n_ptr, size_t* out_count) {
     int leader = uf_find(ra->uf, ra->uf_len, (*n_ptr)->gvn);
@@ -825,7 +826,7 @@ void tb__rogers(Ctx* restrict ctx, TB_Arena* arena) {
         TB_ASSERT(rounds < 50);
 
         // tb_opt__REGALLOC  = rounds == 1;
-        tb_opt__REGALLOC5 = rounds == 2;
+        // tb_opt__REGALLOC5 = rounds == 2;
         // foobar = rounds == 1;
 
         // reset HRP regions
@@ -839,6 +840,16 @@ void tb__rogers(Ctx* restrict ctx, TB_Arena* arena) {
         cuikperf_region_start("round", NULL);
         bool done = allocate_loop(ctx, &ra, arena);
         cuikperf_region_end();
+
+        if (0) {
+            printf("=== ROUND %d === (%zu)\n", rounds, f->node_count);
+            for (int i = 0; i < 10000; i++) {
+                if (histo[i]) {
+                    printf("%d;%d\n", i, histo[i]);
+                    histo[i] = 0;
+                }
+            }
+        }
 
         if (done) {
             // printf("STATS: %d\n", stats_aaa);
@@ -980,13 +991,13 @@ void tb__rogers(Ctx* restrict ctx, TB_Arena* arena) {
 
         size_t num_spills = dyn_array_length(ra.splits);
         if (num_spills) {
-            int dt = (int)num_spills - (int)last_spills;
+            /* int dt = (int)num_spills - (int)last_spills;
             if (rounds == 1) {
                 dt = 0;
             }
 
             printf("AAA %-3d %zu (\x1b[%dm%+d\x1b[0m), %u\n", rounds, num_spills, dt < 0 ? 32 : 31, dt, aarray_length(ctx->vregs));
-            last_spills = num_spills;
+            last_spills = num_spills; */
 
             // reset assignment, but don't try to split them this round
             if (num_spills > 64) {
@@ -1163,7 +1174,7 @@ static void mark_active(Ctx* restrict ctx, Rogers* restrict ra, int gvn) {
     int old = ra->active[vreg->class][vreg->assigned];
     if (old != 0 && old != gvn) {
         // TB_ASSERT(ctx->vreg_map[old] == ctx->vreg_map[gvn]);
-        printf("WARNING!!! %%%u %%%u\n", old, gvn);
+        // printf("WARNING!!! %%%u %%%u\n", old, gvn);
         put_to_sleep(ra, vreg->class, old);
     }
 
@@ -1283,7 +1294,7 @@ static int evict_vreg(Ctx* ctx, Rogers* ra, int target) {
     // reset assignment
     evicted->class = 0;
     evicted->assigned = -1;
-    TB_OPTDEBUG(REGALLOC5)(printf("#       \x1b[33mGONNA SPILL V%u\x1b[0m\n", target));
+    // TB_OPTDEBUG(REGALLOC5)(printf("#       \x1b[33mGONNA SPILL V%u\x1b[0m\n", target));
     return evicted_reg;
 }
 
@@ -1309,13 +1320,13 @@ static bool allocate_reg(Ctx* ctx, Rogers* ra, TB_Node* n) {
         return true;
     }
 
-    IF_OPT(REGALLOC5) {
+    /* IF_OPT(REGALLOC5) {
         printf("#\n");
         rogers_print_vreg(ctx, ra, vreg);
         printf("# ");
         tb_print_dumb_node(NULL, n);
         printf("\n");
-    }
+    } */
 
     int num_regs = def_class == REG_CLASS_STK ? ra->num_spills : ctx->num_regs[def_class];
 
@@ -1336,8 +1347,6 @@ static bool allocate_reg(Ctx* ctx, Rogers* ra, TB_Node* n) {
 
     // interfere live things
     dyn_array_clear(ra->potential_spills);
-    TB_OPTDEBUG(REGALLOC5)(printf("#   "));
-
     FOR_N(i, 0, num_regs) {
         uint32_t gvn = ra->active[def_class][i];
         if (gvn > 0) {
@@ -1345,16 +1354,15 @@ static bool allocate_reg(Ctx* ctx, Rogers* ra, TB_Node* n) {
             uint64_t allot_mask = UINT64_MAX >> (64ull - vreg->reg_width);
             ra_mask[i / 64ull] |= allot_mask << (i % 64ull);
 
-            TB_OPTDEBUG(REGALLOC5)(printf("%%%u -- ", ra->active[def_class][i]), print_reg_name(def_class, i), printf("; "));
+            // TB_OPTDEBUG(REGALLOC5)(printf("%%%u -- ", ra->active[def_class][i]), print_reg_name(def_class, i), printf("; "));
         }
     }
+    int inactive_cnt = 0;
 
     // every node in the coalesced set needs to be checked for interference
     size_t cnt;
     TB_Node** arr = coalesce_set_array(ctx, ra, &n, &cnt);
     {
-        cuikperf_region_start("I", NULL);
-
         TB_BasicBlock** scheduled = ctx->f->scheduled;
         int* order = ra->order;
 
@@ -1362,6 +1370,8 @@ static bool allocate_reg(Ctx* ctx, Rogers* ra, TB_Node* n) {
         BITS64_FOR(i, future->data, future->capacity) {
             TB_Node* other = ra->gvn2node[i];
             VReg* other_vreg = &ctx->vregs[ctx->vreg_map[i]];
+
+            inactive_cnt++;
             if (other_vreg->class != def_class || !within_reg_mask(mask, other_vreg->assigned)) {
                 continue;
             }
@@ -1374,7 +1384,6 @@ static bool allocate_reg(Ctx* ctx, Rogers* ra, TB_Node* n) {
             uint32_t other_gvn = other->gvn;
             TB_BasicBlock* other_block = scheduled[other_gvn];
             FOR_N(j, 0, cnt) {
-                cuikperf_region_start("i", NULL);
                 uint32_t lhs_gvn = arr[j]->gvn;
                 TB_BasicBlock* lhs_block = scheduled[lhs_gvn];
 
@@ -1384,11 +1393,10 @@ static bool allocate_reg(Ctx* ctx, Rogers* ra, TB_Node* n) {
                 } else if (lhs_block != other_block) {
                     query = interfere_in_block(ctx->cfg.blocks, order, scheduled, ra, other, arr[j], other_gvn, lhs_gvn, other_block);
                 }
-                cuikperf_region_end();
 
                 if (query) {
                     TB_ASSERT(other_vreg->assigned >= 0);
-                    TB_OPTDEBUG(REGALLOC5)(printf("%%%u -- ", other->gvn), print_reg_name(def_class, other_assigned), printf("; "));
+                    // TB_OPTDEBUG(REGALLOC5)(printf("%%%u -- ", other->gvn), print_reg_name(def_class, other_assigned), printf("; "));
 
                     dyn_array_put(ra->potential_spills, i);
                     ra_mask[other_assigned / 64ull] |= allot_mask << (other_assigned % 64ull);
@@ -1396,8 +1404,9 @@ static bool allocate_reg(Ctx* ctx, Rogers* ra, TB_Node* n) {
                 }
             }
         }
-        TB_OPTDEBUG(REGALLOC5)(printf(" (%zu p)\n", dyn_array_length(ra->potential_spills)));
-        cuikperf_region_end();
+
+        // assert(inactive_cnt < 10000);
+        // histo[inactive_cnt]++;
     }
 
     int hint_vreg = vreg->hint_vreg;
@@ -1406,22 +1415,11 @@ static bool allocate_reg(Ctx* ctx, Rogers* ra, TB_Node* n) {
         ?  ctx->vregs[hint_vreg].assigned
         :  -1;
 
+    int spilled = -1;
     if (hint_reg >= 0 && (ra_mask[hint_reg / 64ull] & (1ull << (hint_reg % 64ull))) == 0) {
-        TB_OPTDEBUG(REGALLOC5)(printf("#   assigned to "), print_reg_name(def_class, hint_reg), printf(" (HINTED)\n"));
-
         vreg->class    = def_class;
         vreg->assigned = hint_reg;
-        mark_active(ctx, ra, n->gvn);
-        put_to_sleep_vreg(ctx, ra, def_class, cnt, arr, n, vreg_id);
-        return true;
-    }
-
-    if (reg_assign(ctx, vreg, ra_mask, num_regs)) {
-        TB_OPTDEBUG(REGALLOC5)(printf("#       assigned to "), print_reg_name(vreg->class, vreg->assigned), printf("\n"));
-        mark_active(ctx, ra, n->gvn);
-        put_to_sleep_vreg(ctx, ra, def_class, cnt, arr, n, vreg_id);
-        return true;
-    } else {
+    } else if (!reg_assign(ctx, vreg, ra_mask, num_regs)) {
         // if a stack slot failed to color then it means we
         // need more stack slots (there's an indefinite amount :p)
         if (def_class == REG_CLASS_STK) {
@@ -1450,7 +1448,7 @@ static bool allocate_reg(Ctx* ctx, Rogers* ra, TB_Node* n) {
                 ra->mask = tb_arena_alloc(ra->arena, ((ra->mask_cap+63)/64) * sizeof(uint64_t));
             }
 
-            TB_OPTDEBUG(REGALLOC5)(printf("#     assigned to STACK%d (new stack slot)\n", vreg->assigned));
+            TB_OPTDEBUG(REGALLOC5)(printf("STACK%d (new stack slot)\n", vreg->assigned));
             return true;
         }
 
@@ -1461,18 +1459,28 @@ static bool allocate_reg(Ctx* ctx, Rogers* ra, TB_Node* n) {
         dyn_array_put(ra->splits, s);
         if (s.target == vreg_id) {
             // kill this node for now
-            TB_OPTDEBUG(REGALLOC5)(printf("#       assigned UNCOLORED\n"));
-        } else {
-            vreg->class    = def_class;
-            vreg->assigned = evicted_reg;
-
-            mark_active(ctx, ra, n->gvn);
-            put_to_sleep_vreg(ctx, ra, def_class, cnt, arr, n, vreg_id);
-
-            TB_OPTDEBUG(REGALLOC5)(printf("#       assigned to "), print_reg_name(vreg->class, vreg->assigned), printf(" (from V%u)\n", s.target));
+            TB_OPTDEBUG(REGALLOC5)(printf("UNCOLORED\n"));
+            return false;
         }
-        return false;
+        vreg->class    = def_class;
+        vreg->assigned = evicted_reg;
+        spilled        = s.target;
     }
+
+    mark_active(ctx, ra, n->gvn);
+    put_to_sleep_vreg(ctx, ra, def_class, cnt, arr, n, vreg_id);
+
+    IF_OPT(REGALLOC5) {
+        printf("#   \x1b[32massign\x1b[0m %%%-5u V%-5u (%d inactive) => ", n->gvn, vreg_id, inactive_cnt);
+        print_reg_name(vreg->class, vreg->assigned);
+        printf(" ");
+        tb__print_regmask(&OUT_STREAM_DEFAULT, vreg->mask);
+        if (spilled >= 0) {
+            printf(" (spilled V%u) ", spilled);
+        }
+        printf("\n");
+    }
+    return true;
 }
 
 static void compute_ordinals(Ctx* restrict ctx, Rogers* restrict ra, TB_Arena* arena) {
@@ -1663,42 +1671,39 @@ static bool allocate_loop(Ctx* restrict ctx, Rogers* restrict ra, TB_Arena* aren
         Set* live_out     = &bb->live_out;
 
         TB_OPTDEBUG(REGALLOC5)(printf("# ========= BB%zu =========\n", bb_id));
-        printf("TEST %d %d %d %d\n",
-            set_get(live_out, 936), set_get(&ra->live, 936),
-            set_get(live_out, 734), set_get(&ra->live, 734)
-        );
 
         cuikperf_region_start("expire", NULL);
+        int exp=  0;
         // expire intervals for block (was live, isn't now)
         BITS64_FOR_ANDN(j, ra->live.data, live_out->data, live_out->capacity) {
             int vreg_id = ctx->vreg_map[j];
             if (vreg_id > 0) {
+                TB_ASSERT(set_get(&ra->live, j) && !set_get(live_out, j));
                 expire_interval(ctx, ra, ra->gvn2node[j], bb_id, vreg_id);
                 set_remove(&ra->live, j);
+                exp++;
             }
         }
         cuikperf_region_end();
 
         // start intervals
+        int started = 0;
         cuikperf_region_start("start", NULL);
         BITS64_FOR_ANDN(j, live_out->data, ra->live.data, live_out->capacity) {
             int vreg_id = ctx->vreg_map[j];
-            if (vreg_id > 0) {
-                allocate_reg(ctx, ra, ra->gvn2node[j]);
+            if (vreg_id > 0 && allocate_reg(ctx, ra, ra->gvn2node[j])) {
                 set_put(&ra->live, j);
+                started++;
             }
         }
         cuikperf_region_end();
+        // printf("  Start %zu %d %d\n", bb_id, started, exp);
 
         // it's a backwards walk so...
         //   each use will try to place the node into the active set.
         //   each def will either put the node to sleep or kill it.
         FOR_REV_N(j, 0, aarray_length(bb->items)) {
             TB_Node* n = bb->items[j];
-            if (0) { // if (!IS_PROJ(n) || n->inputs[0] != f->root_node) {
-                continue;
-            }
-
             TB_OPTDEBUG(REGALLOC5)(printf("#> "), tb_print_dumb_node(NULL, n), printf("\n"));
 
             int def_t = ra->order[n->gvn];

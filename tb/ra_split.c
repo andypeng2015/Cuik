@@ -1,4 +1,6 @@
 
+static int bbb;
+
 // "Register Spilling and Live-Range Splitting for SSA-Form Programs" Sebastian Hack, Matthias Braun (2009)
 typedef struct {
     size_t old_node_count;
@@ -49,7 +51,11 @@ static bool should_skip_over(TB_Node* n) {
     return IS_PROJ(n) || n->type == TB_PHI || n->type == TB_MACH_FRAME_PTR;
 }
 
-static bool is_in_stack(Ctx* ctx, TB_Node* n) {
+static bool is_in_stack(Ctx* ctx, TB_Node* n, bool W) {
+    if (n->type == TB_PHI) {
+        return !W;
+    }
+
     RegMask* def_mask = ctx->constraint(ctx, n, NULL);
     return reg_mask_is_stack(def_mask);
 }
@@ -274,7 +280,7 @@ static uint64_t update_phi_edges(Ctx* ctx, Rogers* ra, RegSplitter* splitter, ui
         }
 
         if (!((splitter->remat_all >> k) & 1) && pred_def) {
-            bool is_stk     = is_in_stack(ctx, pred_def);
+            bool is_stk     = is_in_stack(ctx, pred_def, (splitter->W_exit[pred_id] >> k) & 1);
             bool should_stk = (~W >> k) & 1;
             if (is_stk && !should_stk) {
                 pred_def = insert_reload(ctx, ra, splitter, &ctx->cfg.blocks[pred_id], defs, pred_defs, k, splitter->W_exit[pred_id], NULL);
@@ -288,7 +294,13 @@ static uint64_t update_phi_edges(Ctx* ctx, Rogers* ra, RegSplitter* splitter, ui
                         TB_OPTDEBUG(REGSPLIT)(printf("  BB%d: SPILL%zu: convert copy to spill-store %%%u\n", bb_id, k, pred_def->gvn));
                     }
                 } else {
-                    pred_def = insert_spill(ctx, ra, splitter, &ctx->cfg.blocks[pred_id], pred_def, k, NULL);
+                    if (pred_def->type == TB_MACH_COPY && is_reload(pred_def)) {
+                        // If we're gonna spill a reload, let's just extend the existing spill
+                        TB_OPTDEBUG(REGSPLIT)(printf("  BB%d: SPILL%zu: don't spill %%%u (a reload), extend lifetime of existing spill %%%u\n", bb_id, k, pred_def->gvn, pred_def->inputs[1]->gvn));
+                        pred_def = pred_def->inputs[1];
+                    } else {
+                        pred_def = insert_spill(ctx, ra, splitter, &ctx->cfg.blocks[pred_id], pred_def, k, NULL);
+                    }
                 }
             }
         }
@@ -356,9 +368,8 @@ static void tb__insert_splits(Ctx* ctx, Rogers* restrict ra, SplitDecision* spli
     TB_Arena* arena = ra->arena;
     TB_Function* f = ctx->f;
 
-    // static int bbb;
     // bbb++;
-    // tb_opt__REGSPLIT = bbb == 2; // bbb == 10 || bbb == 11;
+    // tb_opt__REGSPLIT = bbb == 6 || bbb == 7;
 
     TB_OPTDEBUG(REGSPLIT)(printf("== INSERT NODES ==\n"));
 
@@ -778,7 +789,7 @@ static void tb__insert_splits(Ctx* ctx, Rogers* restrict ra, SplitDecision* spli
                                         TB_OPTDEBUG(REGSPLIT)(printf("  BB%zu: SPILL%zu: convert copy to spill-store %%%u\n", bb_id, spill, def->gvn));
                                     }
                                 } else {
-                                    TB_OPTDEBUG(REGSPLIT)(printf("  BB%zu: SPILL%zu: split remat %%%u\n", bb_id, spill, def->gvn));
+                                    TB_OPTDEBUG(REGSPLIT)(printf("  BB%zu: SPILL%zu: split remat %%%u (%s)\n", bb_id, spill, def->gvn, tb_node_get_name(def->type)));
                                 }
 
                                 has_spilled |= (1ull << spill);
@@ -953,7 +964,7 @@ static void tb__insert_splits(Ctx* ctx, Rogers* restrict ra, SplitDecision* spli
                                 TB_OPTDEBUG(REGSPLIT)(printf("  BB%zu: SPILL%d: convert copy to spill-store %%%u\n", bb_id, spill, n->gvn));
                             }
                         } else {
-                            TB_OPTDEBUG(REGSPLIT)(printf("  BB%zu: SPILL%d: split remat %%%u\n", bb_id, spill, n->gvn));
+                            TB_OPTDEBUG(REGSPLIT)(printf("  BB%zu: SPILL%d: split remat %%%u (%s)\n", bb_id, spill, n->gvn, tb_node_get_name(n->type)));
                         }
 
                         // S &= ~(1ull << spill);
