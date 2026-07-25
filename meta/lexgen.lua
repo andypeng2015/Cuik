@@ -860,6 +860,23 @@ Token lexer_read(Lexer* restrict l) {
     uint64_t tag = lexer_final_state[state];
     if (tag == L_IDENT) {
         t.type = TOKEN_IDENTIFIER;
+    } else if (start[0] == '.' && (start[1] >= '0' && start[1] <= '9')) {
+        t.type = TOKEN_FLOAT;
+        
+        // we've gotten through the simple integer stuff, time for floats
+        for (;;) {
+            char a = *current;
+            if ((a == 'e' || a == 'E' || a == 'p' || a == 'P') && (current[1] == '+' || current[1] == '-')) {
+                t.type = TOKEN_FLOAT;
+                current += 2;
+            } else if ((a >= '0' && a <= '9') || (a >= 'a' && a <= 'z') || (a >= 'A' && a <= 'Z')) {
+                current += 1;
+            } else {
+                break;
+            }
+        }
+
+        t.content = (String){ current - start, start };
     } else if (tag == L_NUMBER) {
         t.type = TOKEN_INTEGER;
 

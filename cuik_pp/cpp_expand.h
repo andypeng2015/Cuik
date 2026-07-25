@@ -176,18 +176,18 @@ static InvokeCursor advance(InvokeCursor c) {
     return c;
 }
 
-static bool invoke_eat(Cuik_CPP* restrict ctx, Lexer* in, Token* out_t, InvokeCursor* c, TknType type) {
+static bool invoke_eat(Cuik_CPP* restrict ctx, CPPStackSlot* slot, Token* out_t, InvokeCursor* c, TknType type) {
     InvokeCursor next = advance(*c);
     if (c->elem == NULL) {
-        if (in == NULL) {
+        if (slot == NULL) {
             return false;
         }
 
         // read from lexer
-        unsigned char* savepoint = in->current;
-        *out_t = lexer_read(in);
+        unsigned char* savepoint = cpp_lexer_pos(slot);
+        *out_t = cpp_lexer_read(slot);
         if (out_t->type != type) {
-            in->current = savepoint;
+            cpp_lexer_seek(slot, savepoint);
             return false;
         }
     } else {
@@ -201,10 +201,10 @@ static bool invoke_eat(Cuik_CPP* restrict ctx, Lexer* in, Token* out_t, InvokeCu
     return true;
 }
 
-static Token read_one(Cuik_CPP* restrict ctx, Lexer* in, InvokeCursor* c) {
+static Token read_one(Cuik_CPP* restrict ctx, CPPStackSlot* slot, InvokeCursor* c) {
     if (c->elem == NULL) {
         // read from lexer
-        return lexer_read(in);
+        return cpp_lexer_read(slot);
     } else {
         Token t = ctx->tokens.list.tokens[c->pos];
         *c = advance(*c);
@@ -213,7 +213,7 @@ static Token read_one(Cuik_CPP* restrict ctx, Lexer* in, InvokeCursor* c) {
 }
 
 // returns the number of newly inserted tokens at the read_head
-static int expand_identifier(Cuik_CPP* restrict ctx, Lexer* in, InvokeElem* parent, int read_head, int end_token, uint32_t parent_macro, MacroDef* def, int depth, int* out_read_tail) {
+static int expand_identifier(Cuik_CPP* restrict ctx, CPPStackSlot* slot, InvokeElem* parent, int read_head, int end_token, uint32_t parent_macro, MacroDef* def, int depth, int* out_read_tail) {
     if (expand_builtin_idents(ctx, &ctx->tokens.list.tokens[read_head])) {
         return 0;
     }
@@ -232,12 +232,12 @@ static int expand_identifier(Cuik_CPP* restrict ctx, Lexer* in, InvokeElem* pare
     // create macro invoke site
     uint32_t macro_id = dyn_array_length(ctx->tokens.invokes);
     dyn_array_put(ctx->tokens.invokes, (MacroInvoke){
-            .name      = t.content,
-            .depth     = parent_macro ? ctx->tokens.invokes[parent_macro].depth+1 : 1,
-            .parent    = parent_macro,
-            .def_site  = { def_site, { def_site.raw + def_str.length } },
-            .call_site = t.location,
-        });
+                  .name      = t.content,
+                  .depth     = parent_macro ? ctx->tokens.invokes[parent_macro].depth+1 : 1,
+                  .parent    = parent_macro,
+                  .def_site  = { def_site, { def_site.raw + def_str.length } },
+                  .call_site = t.location,
+                  });
 
     const unsigned char* param_str = def->key.data + def->key.length;
     Lexer def_lexer = {
@@ -257,7 +257,7 @@ static int expand_identifier(Cuik_CPP* restrict ctx, Lexer* in, InvokeElem* pare
 
         // ignore this expansion if we're missing the opening paren
         Token arg_t;
-        if (!invoke_eat(ctx, in, &arg_t, &cursor, '(')) {
+        if (!invoke_eat(ctx, slot, &arg_t, &cursor, '(')) {
             if (out_read_tail) { *out_read_tail = read_tail; }
             return 0;
         }
@@ -267,7 +267,6 @@ static int expand_identifier(Cuik_CPP* restrict ctx, Lexer* in, InvokeElem* pare
             .start = (unsigned char*) param_str + 1,
             .current = (unsigned char*) param_str + 1,
         };
-
         args = aarray_create(&ctx->tmp_arena, MacroArg, 8);
 
         ////////////////////////////////
@@ -349,7 +348,7 @@ static int expand_identifier(Cuik_CPP* restrict ctx, Lexer* in, InvokeElem* pare
                     break;
                 }
 
-                arg_t = read_one(ctx, in, &cursor);
+                arg_t = read_one(ctx, slot, &cursor);
             }
 
             dt += dyn_array_length(ctx->tokens.list.tokens) - read_tail;
@@ -390,8 +389,8 @@ static int expand_identifier(Cuik_CPP* restrict ctx, Lexer* in, InvokeElem* pare
 
                 // convert token location into macro relative
                 /*if ((arg_t.location.raw & SourceLoc_IsMacro) == 0) {
-                    uint32_t pos = arg_t.location.raw & ((1u << SourceLoc_FilePosBits) - 1);
-                    arg_t.location = encode_macro_loc(macro_id, pos);
+                uint32_t pos = arg_t.location.raw & ((1u << SourceLoc_FilePosBits) - 1);
+                arg_t.location = encode_macro_loc(macro_id, pos);
                 }*/
                 arg_t = tokens[arg_head++];
             }
@@ -423,11 +422,17 @@ static int expand_identifier(Cuik_CPP* restrict ctx, Lexer* in, InvokeElem* pare
     }
 
     // Subst & Stringize
+    bool has_space = t.has_space;
     size_t start = dyn_array_length(ctx->tokens.list.tokens);
     for (;;) {
         Token def_t = lexer_read(&def_lexer);
         if (def_t.type == 0 || def_t.hit_line) {
             break;
+        }
+
+        if (has_space) {
+            def_t.has_space = true;
+            has_space = false;
         }
 
         if (def_t.type == TOKEN_HASH) {
@@ -573,7 +578,7 @@ static int expand_identifier(Cuik_CPP* restrict ctx, Lexer* in, InvokeElem* pare
             MacroDef* kid_def = find_define(ctx, t->content.data, t->content.length);
             if (kid_def != NULL) {
                 int kid_read_tail;
-                ptrdiff_t kid_dt = expand_identifier(ctx, in, &invoke_elem, i, end, macro_id, kid_def, depth+1, &kid_read_tail);
+                ptrdiff_t kid_dt = expand_identifier(ctx, slot, &invoke_elem, i, end, macro_id, kid_def, depth+1, &kid_read_tail);
                 end += kid_dt;
                 assert(end >= start);
 

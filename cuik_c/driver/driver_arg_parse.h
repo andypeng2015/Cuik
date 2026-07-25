@@ -243,16 +243,16 @@ static void print_help(void) {
 
     /*size_t split = 24;
     for (int i = 1; i < ARG_DESC_COUNT; i++) {
-        printf("    ");
+    printf("    ");
 
-        size_t len = printf("-%s", arg_descs[i].alias);
-        if (arg_descs[i].has_arg) {
-            len += printf(" <value>");
-        }
+    size_t len = printf("-%s", arg_descs[i].alias);
+    if (arg_descs[i].has_arg) {
+    len += printf(" <value>");
+    }
 
-        size_t round_up = len + (split - (len % split)) % split;
-        for (int j = len; j < round_up; j++) printf(" ");
-        printf("%s\n", arg_descs[i].desc);
+    size_t round_up = len + (split - (len % split)) % split;
+    for (int j = len; j < round_up; j++) printf(" ");
+    printf("%s\n", arg_descs[i].desc);
     }
     printf("\n");*/
 }
@@ -335,9 +335,9 @@ CUIK_API bool cuik_parse_driver_args(Cuik_DriverArgs* comp_args, int argc, const
                 len++;
             }
 
-            ArgEntry* e = arg_get_ht(1, first+1);
+            ArgEntry* e = arg_get_ht(len, first+1);
             if (e == NULL) {
-                e = arg_get_ht(len, first+1);
+                e = arg_get_ht(1, first+1);
             }
 
             if (e == NULL || e->is_short != is_short || options[e->val].type == ARG_ENUM_VAL) {

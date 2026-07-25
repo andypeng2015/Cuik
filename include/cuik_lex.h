@@ -88,7 +88,6 @@ typedef struct {
     const char* filename;
     bool is_system;
 
-    int depth;
     SourceLoc include_site;
     // describes how far from the start of the file we are.
     // used by line_map on big files

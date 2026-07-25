@@ -9,14 +9,14 @@ typedef struct {
 static intmax_t eval_ternary(Cuik_CPP* restrict c, ExprParser* in);
 static intmax_t eval_ternary_safe(Cuik_CPP* restrict c, ExprParser* in);
 
-static intmax_t eval(Cuik_CPP* restrict ctx, Lexer* restrict in) {
+static intmax_t eval(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot) {
     DynArray(Token) tokens = ctx->tokens.list.tokens;
     int start = dyn_array_length(tokens);
 
     // place all the tokens on this line into the buffer to be expanded
     Token t;
     for (;;) {
-        t = lexer_read(in);
+        t = cpp_lexer_read(slot);
         if (t.type == 0 || t.hit_line) { break; }
         push_token(ctx, t);
 
@@ -27,10 +27,10 @@ static intmax_t eval(Cuik_CPP* restrict ctx, Lexer* restrict in) {
 
             if (string_equals_cstr(&t.content, "defined")) {
                 bool paren = false;
-                t = lexer_read(in);
+                t = cpp_lexer_read(slot);
                 if (t.type == '(') {
                     paren = true;
-                    t = lexer_read(in);
+                    t = cpp_lexer_read(slot);
                 }
 
                 if (t.type != TOKEN_IDENTIFIER) {
@@ -43,7 +43,7 @@ static intmax_t eval(Cuik_CPP* restrict ctx, Lexer* restrict in) {
                 tokens[head] = (Token){ .type = TOKEN_INTEGER, .location = loc, .content = string_cstr(found ? "1" : "0") };
 
                 if (paren) {
-                    t = lexer_read(in);
+                    t = cpp_lexer_read(slot);
                     if (t.type != ')') {
                         diag_err(&ctx->tokens, get_token_range(&t), "expected closing paren");
                         goto error;
@@ -52,7 +52,7 @@ static intmax_t eval(Cuik_CPP* restrict ctx, Lexer* restrict in) {
             } else {
                 MacroDef* def = find_define(ctx, t.content.data, t.content.length);
                 if (def != NULL) {
-                    expand_identifier(ctx, in, NULL, head, head+1, 0, def, 0, NULL);
+                    expand_identifier(ctx, slot, NULL, head, head+1, 0, def, 0, NULL);
                 }
             }
 
@@ -65,7 +65,7 @@ static intmax_t eval(Cuik_CPP* restrict ctx, Lexer* restrict in) {
             }
         }
     }
-    in->current = (unsigned char*) t.content.data;
+    cpp_lexer_seek(slot, (unsigned char*) t.content.data);
 
     // EOL token
     push_token(ctx, (Token){ 0 });
@@ -122,8 +122,8 @@ static intmax_t eval_unary(Cuik_CPP* restrict c, ExprParser* in) {
 
         if (CONSUME(in).type != ')') {
             /*report_two_spots(REPORT_ERROR, NULL, s, t.location, tokens_get(s)->location,
-                "expected closing parenthesis for macro subexpression",
-                "open", "close?", NULL);*/
+            "expected closing parenthesis for macro subexpression",
+            "open", "close?", NULL);*/
             longjmp(eval__restore_point, 1);
         }
     } else {

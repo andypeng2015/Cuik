@@ -44,6 +44,8 @@ typedef struct {
 } MacroDef;
 
 struct Cuik_CPP {
+    bool finalized;
+
     Cuik_Version version;
     bool case_insensitive;
 
@@ -64,7 +66,6 @@ struct Cuik_CPP {
     Token directive_token;
 
     // preprocessor stack
-    int stack_ptr;
     struct CPPStackSlot* stack;
 
     // stats
@@ -117,7 +118,7 @@ typedef enum {
 // GOD I HATE FORWARD DECLARATIONS
 static bool is_defined(Cuik_CPP* restrict c, const unsigned char* start, size_t length);
 static void expect(TokenArray* restrict in, char ch);
-static intmax_t eval(Cuik_CPP* restrict c, Lexer* restrict in);
+static intmax_t eval(Cuik_CPP* restrict ctx, struct CPPStackSlot* restrict slot);
 
 static bool push_scope(Cuik_CPP* restrict ctx, SourceRange r, bool initial);
 static bool pop_scope(Cuik_CPP* restrict ctx, SourceRange r);
@@ -126,13 +127,18 @@ static Token quote_token_array(Cuik_CPP* restrict ctx, SourceLoc loc, int start,
 
 static Cuik_Path* alloc_path(Cuik_CPP* restrict ctx, const char* filepath);
 static Cuik_Path* alloc_directory_path(Cuik_CPP* restrict ctx, const char* filepath);
-static void compute_line_map(Cuik_CPP* restrict ctx, bool is_system, int depth, SourceLoc include_site, const char* filename, char* data, size_t length);
+static void compute_line_map(Cuik_CPP* restrict ctx, bool is_system, SourceLoc include_site, const char* filename, char* data, size_t length);
 
 enum {
     MAX_CPP_STACK_DEPTH = 1024,
+    TOKEN_CACHE_SIZE    = 8,
 };
 
-typedef struct CPPStackSlot {
+typedef struct CPPStackSlot CPPStackSlot;
+struct CPPStackSlot {
+    CPPStackSlot* prev;
+
+    TB_ArenaSavepoint sp;
     Cuik_Path* filepath;
     Cuik_Path* directory;
 
@@ -151,7 +157,11 @@ typedef struct CPPStackSlot {
         int if_depth; // the depth value we expect the include guard to be at
         String define;
     } include_guard;
-} CPPStackSlot;
+
+    int cache_head;
+    int cache_tail;
+    Token cache[TOKEN_CACHE_SIZE];
+};
 
 // just the value (doesn't track the name of the parameter)
 typedef struct {
@@ -174,6 +184,34 @@ typedef struct {
 
     bool has_varargs;
 } MacroArgs;
+
+static Token cpp_lexer_read(CPPStackSlot* slot) {
+    if (slot->cache_head == slot->cache_tail) {
+        // Fill again
+        slot->cache_head = 0;
+        slot->cache_tail = TOKEN_CACHE_SIZE;
+
+        for (int i = 0; i < TOKEN_CACHE_SIZE; i++) {
+            slot->cache[i] = lexer_read(&slot->lexer);
+        }
+    }
+    return slot->cache[slot->cache_head++];
+}
+
+static unsigned char* cpp_lexer_pos(CPPStackSlot* slot) {
+    return (unsigned char*) slot->cache[slot->cache_head].content.data;
+}
+
+static void cpp_lexer_seek(CPPStackSlot* slot, unsigned char* savepoint) {
+    if (slot->cache_head > 0 && slot->cache[slot->cache_head - 1].content.data == savepoint) {
+        // printf("HIT!!!!\n");
+        slot->cache_head -= 1;
+    } else {
+        // printf("MISS!!!\n");
+        slot->lexer.current = savepoint;
+        slot->cache_head    = slot->cache_tail;
+    }
+}
 
 static Token peek(TokenArray* restrict in) {
     return in->tokens[in->current];
@@ -288,7 +326,6 @@ Cuik_CPP* cuikpp_make(const Cuik_CPPDesc* desc) {
         .fs        = desc->fs,
         .user_data = desc->fs_data,
         .case_insensitive = desc->case_insensitive,
-        .stack = cuik__valloc(MAX_CPP_STACK_DEPTH * sizeof(CPPStackSlot)),
     };
 
     tb_arena_create(&ctx->tmp_arena, NULL);
@@ -308,15 +345,15 @@ Cuik_CPP* cuikpp_make(const Cuik_CPPDesc* desc) {
 
     // FileID 0 is the builtin macro file or the NULL file depending on who you ask
     dyn_array_put(ctx->tokens.files, (Cuik_FileEntry){ .filename = "<builtin>", .content_length = (1u << SourceLoc_FilePosBits) - 1u });
-    tls_init();
 
-    {
-        ctx->stack_ptr = 1;
-        ctx->stack[0] = (CPPStackSlot){ 0 };
-        ctx->stack[0].filepath = alloc_path(ctx, filepath);
-        ctx->stack[0].directory = alloc_directory_path(ctx, filepath);
-    }
-
+    TB_ArenaSavepoint sp = tb_arena_save(&ctx->tmp_arena);
+    CPPStackSlot* top = tb_arena_alloc(&ctx->tmp_arena, sizeof(CPPStackSlot));
+    *top = (CPPStackSlot){
+        .sp = sp,
+        .filepath = alloc_path(ctx, filepath),
+        .directory = alloc_directory_path(ctx, filepath),
+    };
+    ctx->stack = top;
     return ctx;
 }
 
@@ -360,28 +397,28 @@ void cuiklex_free_tokens(TokenStream* tokens) {
 void cuikpp_finalize(Cuik_CPP* ctx) {
     #if CUIK__CPP_STATS
     fprintf(stderr, " %-80s | %.06f ms read+lex\t| %4zu files read\t| %zu fstats\t| %f ms (%zu defines)\n",
-        ctx->tokens.filepath,
-        ctx->total_io_time / 1000000.0,
-        ctx->total_files_read,
-        ctx->total_fstats,
-        ctx->total_define_access_time / 1000000.0,
-        ctx->total_define_accesses
-    );
+            ctx->tokens.filepath,
+            ctx->total_io_time / 1000000.0,
+            ctx->total_files_read,
+            ctx->total_fstats,
+            ctx->total_define_access_time / 1000000.0,
+            ctx->total_define_accesses
+            );
     #endif
 
     CUIK_TIMED_BLOCK("cuikpp_finalize") {
         nl_hashset_free(ctx->macros);
-        cuik__vfree(ctx->stack, MAX_CPP_STACK_DEPTH * sizeof(CPPStackSlot));
         ctx->stack = NULL;
     }
 
-    // tb_arena_destroy(&ctx->tmp_arena);
+    tb_arena_destroy(&ctx->tmp_arena);
     nl_map_free(ctx->include_once);
+    ctx->finalized = true;
 }
 
 void cuikpp_free(Cuik_CPP* ctx) {
     dyn_array_destroy(ctx->system_include_dirs);
-    if (ctx->stack != NULL) {
+    if (!ctx->finalized) {
         cuikpp_finalize(ctx);
     }
     cuik_free(ctx);
@@ -451,17 +488,17 @@ Cuik_FileLoc cuikpp_find_location_in_bytes(TokenStream* tokens, SourceLoc loc) {
     return (Cuik_FileLoc){ f, pos };
 
     /*if ((loc.raw & SourceLoc_IsMacro) == 0) {
-        assert((loc.raw >> SourceLoc_FilePosBits) < dyn_array_length(tokens->files));
-        Cuik_FileEntry* f = &tokens->files[loc.raw >> SourceLoc_FilePosBits];
-        uint32_t pos = loc.raw & ((1u << SourceLoc_FilePosBits) - 1);
+    assert((loc.raw >> SourceLoc_FilePosBits) < dyn_array_length(tokens->files));
+    Cuik_FileEntry* f = &tokens->files[loc.raw >> SourceLoc_FilePosBits];
+    uint32_t pos = loc.raw & ((1u << SourceLoc_FilePosBits) - 1);
 
-        return (Cuik_FileLoc){ f, pos };
+    return (Cuik_FileLoc){ f, pos };
     } else {
-        uint32_t macro_id = (loc.raw & ((1u << SourceLoc_MacroIDBits) - 1)) >> SourceLoc_MacroOffsetBits;
-        uint32_t macro_off = loc.raw & ((1u << SourceLoc_MacroOffsetBits) - 1);
+    uint32_t macro_id = (loc.raw & ((1u << SourceLoc_MacroIDBits) - 1)) >> SourceLoc_MacroOffsetBits;
+    uint32_t macro_off = loc.raw & ((1u << SourceLoc_MacroOffsetBits) - 1);
 
-        Cuik_FileLoc fl = cuikpp_find_location_in_bytes(tokens, tokens->invokes[macro_id].def_site.start);
-        return (Cuik_FileLoc){ fl.file, fl.pos + macro_off };
+    Cuik_FileLoc fl = cuikpp_find_location_in_bytes(tokens, tokens->invokes[macro_id].def_site.start);
+    return (Cuik_FileLoc){ fl.file, fl.pos + macro_off };
     }*/
 }
 
@@ -485,7 +522,7 @@ ResolvedSourceLoc cuikpp_find_location(TokenStream* tokens, SourceLoc loc) {
     return find_location(fl.file, fl.pos);
 }
 
-static void compute_line_map(Cuik_CPP* restrict ctx, bool is_system, int depth, SourceLoc include_site, const char* filename, char* data, size_t length) {
+static void compute_line_map(Cuik_CPP* restrict ctx, bool is_system, SourceLoc include_site, const char* filename, char* data, size_t length) {
     DynArray(uint32_t) line_map = dyn_array_create(uint32_t, (length / 20) + 32);
 
     #if 1
@@ -524,7 +561,7 @@ static void compute_line_map(Cuik_CPP* restrict ctx, bool is_system, int depth, 
         size_t chunk_end = i + single_file_limit;
         if (chunk_end > length) chunk_end = length;
 
-        dyn_array_put(ctx->tokens.files, (Cuik_FileEntry){ filename, is_system, depth, include_site, i, chunk_end - i, &data[i], line_map });
+        dyn_array_put(ctx->tokens.files, (Cuik_FileEntry){ filename, is_system, include_site, i, chunk_end - i, &data[i], line_map });
         i += single_file_limit;
     } while (i < length);
 }
@@ -532,7 +569,7 @@ static void compute_line_map(Cuik_CPP* restrict ctx, bool is_system, int depth, 
 static Cuik_Path* alloc_path(Cuik_CPP* restrict ctx, const char* filepath) {
     size_t len = strlen(filepath);
 
-    Cuik_Path* new_path = tb_arena_alloc(&ctx->tmp_arena, sizeof(Cuik_PathFlex) + len + 1);
+    Cuik_Path* new_path = tb_arena_alloc(&ctx->perm_arena, sizeof(Cuik_PathFlex) + len + 1);
     cuik_path_set(new_path, filepath);
     return new_path;
 }
@@ -546,12 +583,12 @@ static Cuik_Path* alloc_directory_path(Cuik_CPP* restrict ctx, const char* filep
 }
 
 Cuikpp_Status cuikpp_run(Cuik_CPP* restrict ctx) {
-    assert(ctx->stack_ptr > 0);
-    CPPStackSlot* restrict slot = &ctx->stack[ctx->stack_ptr - 1];
+    assert(ctx->stack != NULL);
 
     ////////////////////////////////
     // first file doesn't need to check include paths
     ////////////////////////////////
+    CPPStackSlot* slot = ctx->stack;
     slot->include_guard = (struct CPPIncludeGuard){ 0 };
 
     #if CUIK__CPP_STATS
@@ -579,7 +616,7 @@ Cuikpp_Status cuikpp_run(Cuik_CPP* restrict ctx) {
         .current = (unsigned char*) main_file.data,
     };
 
-    compute_line_map(ctx, false, 0, (SourceLoc){ 0 }, slot->filepath->data, main_file.data, main_file.length);
+    compute_line_map(ctx, false, (SourceLoc){ 0 }, slot->filepath->data, main_file.data, main_file.length);
     // Token t = lexer_read(&slot->lexer);
 
     // continue along to the actual preprocessing now
@@ -597,17 +634,14 @@ Cuikpp_Status cuikpp_run(Cuik_CPP* restrict ctx) {
     // estimate a good final token count, if we get this right we'll zip past without resizes
     ctx->tokens.list.tokens = dyn_array_create(Token, 1024);
 
-    int ttt = 0;
     for (;;) yield: {
-        slot = &ctx->stack[ctx->stack_ptr - 1];
-
+        slot = ctx->stack;
         Lexer* restrict in = &slot->lexer;
         for (;;) {
             // Hot code, just copying tokens over
             Token first;
             for (;;) {
-                ttt++;
-                first = lexer_read(in);
+                first = cpp_lexer_read(slot);
                 if (first.type == 0) {
                     goto pop_stack;
                 }
@@ -625,7 +659,7 @@ Cuikpp_Status cuikpp_run(Cuik_CPP* restrict ctx) {
                         push_token(ctx, first);
 
                         cuikperf_region_start2("expand", first.content.length, (const char*) first.content.data);
-                        expand_identifier(ctx, in, NULL, start, start+1, 0, def, 0, NULL);
+                        expand_identifier(ctx, slot, NULL, start, start+1, 0, def, 0, NULL);
                         cuikperf_region_end();
 
                         // classify any newly-generated identifiers
@@ -645,7 +679,7 @@ Cuikpp_Status cuikpp_run(Cuik_CPP* restrict ctx) {
                 }
             }
 
-            first = lexer_read(in);
+            first = cpp_lexer_read(slot);
             ctx->directive_token = first;
 
             // Slow code, defines
@@ -653,11 +687,11 @@ Cuikpp_Status cuikpp_run(Cuik_CPP* restrict ctx) {
             String directive = first.content;
 
             // shorthand for calling the directives in cpp_directive.h
-            #define MATCH(str)                                         \
-            if (memcmp(directive.data, #str, sizeof(#str) - 1) == 0) { \
-                result = cpp__ ## str(ctx, slot, in);                  \
-                break;                                                 \
-            }
+            #define MATCH(str)                                             \
+                if (memcmp(directive.data, #str, sizeof(#str) - 1) == 0) { \
+                    result = cpp__ ## str(ctx, slot);                      \
+                    break;                                                 \
+                }
 
             // all the directives go here
             cuikperf_region_start2("directive", first.content.length, (const char*) first.content.data);
@@ -714,7 +748,10 @@ Cuikpp_Status cuikpp_run(Cuik_CPP* restrict ctx) {
 
         // this is called when we're done with a specific file
         pop_stack:
-        ctx->stack_ptr -= 1;
+        assert(slot == ctx->stack);
+        CPPStackSlot* prev = slot->prev;
+        tb_arena_restore(&ctx->tmp_arena, slot->sp);
+        ctx->stack = prev;
 
         if (slot->include_guard.status == INCLUDE_GUARD_EXPECTING_NOTHING) {
             IncludeGuardEntry e = { slot->include_guard.define };
@@ -727,7 +764,7 @@ Cuikpp_Status cuikpp_run(Cuik_CPP* restrict ctx) {
         }
 
         // if this is the last file, just exit
-        if (ctx->stack_ptr == 0) {
+        if (ctx->stack == NULL) {
             // place last token
             dyn_array_put(s->list.tokens, (Token){ 0 });
 
@@ -746,12 +783,12 @@ void cuikpp_dump_defines(Cuik_CPP* ctx) {
 
     size_t cap = 1u << ctx->macros.exp;
     for (size_t i = 0; i < cap; i++) {
-        if (ctx->macros.keys[i].length != 0 && ctx->macros.keys[i].length != MACRO_DEF_TOMBSTONE) {
-            String key = ctx->macros.keys[i];
-            String val = ctx->macros.vals[i].value;
+    if (ctx->macros.keys[i].length != 0 && ctx->macros.keys[i].length != MACRO_DEF_TOMBSTONE) {
+    String key = ctx->macros.keys[i];
+    String val = ctx->macros.vals[i].value;
 
-            printf("  #define %.*s %.*s\n", (int)key.length, key.data, (int)val.length, val.data);
-        }
+    printf("  #define %.*s %.*s\n", (int)key.length, key.data, (int)val.length, val.data);
+    }
     }
 
     printf("\n// Macro defines active: %d\n", count);*/

@@ -15,14 +15,13 @@ typedef enum {
 // and hit a #else, #endif, or #elif
 //
 // Simple right :P
-static DirectiveResult skip_directive_body(Lexer* restrict in) {
+static DirectiveResult skip_directive_body(CPPStackSlot* slot) {
     int depth = 0;
-
-    Token t = lexer_read(in);
+    Token t = cpp_lexer_read(slot);
     while (t.type) {
         if (t.type == '#') {
             unsigned char* savepoint = (unsigned char*) t.content.data;
-            t = lexer_read(in);
+            t = cpp_lexer_read(slot);
 
             if (t.type == TOKEN_IDENTIFIER) {
                 if (string_equals_cstr(&t.content, "if") ||
@@ -32,20 +31,20 @@ static DirectiveResult skip_directive_body(Lexer* restrict in) {
                 } else if (string_equals_cstr(&t.content, "elif") || string_equals_cstr(&t.content, "else")) {
                     // else/elif does both entering a scope and exiting one
                     if (depth == 0) {
-                        in->current = savepoint;
+                        cpp_lexer_seek(slot, savepoint);
                         return DIRECTIVE_SUCCESS;
                     }
                 } else if (string_equals_cstr(&t.content, "endif")) {
                     if (depth == 0) {
                         // revert both the identifier and hash
-                        in->current = savepoint;
+                        cpp_lexer_seek(slot, savepoint);
                         return DIRECTIVE_SUCCESS;
                     }
                     depth--;
                 }
             }
         } else {
-            t = lexer_read(in);
+            t = cpp_lexer_read(slot);
         }
     }
 
@@ -54,39 +53,39 @@ static DirectiveResult skip_directive_body(Lexer* restrict in) {
     return DIRECTIVE_ERROR;
 }
 
-static void warn_if_newline(Lexer* restrict in) {
+static void warn_if_newline(CPPStackSlot* slot) {
     Token t;
-    while (t = lexer_read(in), t.type && !t.hit_line) {
+    while (t = cpp_lexer_read(slot), t.type && !t.hit_line) {
     }
-    in->current = (unsigned char*) t.content.data;
+    cpp_lexer_seek(slot, (unsigned char*) t.content.data);
 }
 
-static SourceRange get_pp_tokens_until_newline(Cuik_CPP* ctx, Lexer* in) {
-    Token t = lexer_read(in);
+static SourceRange get_pp_tokens_until_newline(Cuik_CPP* ctx, CPPStackSlot* restrict slot) {
+    Token t = cpp_lexer_read(slot);
     SourceLoc loc = t.location;
     while (!t.hit_line) {
-        t = lexer_read(in);
+        t = cpp_lexer_read(slot);
     }
     return (SourceRange){ loc, get_end_location(&t) };
 }
 
-static DirectiveResult cpp__warning(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot, Lexer* restrict in) {
-    SourceRange r = get_pp_tokens_until_newline(ctx, in);
+static DirectiveResult cpp__warning(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot) {
+    SourceRange r = get_pp_tokens_until_newline(ctx, slot);
     diag_warn(&ctx->tokens, r, "TODO");
     // diag_warn(&ctx->tokens, r, "%!S", msg);
     return DIRECTIVE_SUCCESS;
 }
 
-static DirectiveResult cpp__error(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot, Lexer* restrict in) {
-    SourceRange r = get_pp_tokens_until_newline(ctx, in);
+static DirectiveResult cpp__error(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot) {
+    SourceRange r = get_pp_tokens_until_newline(ctx, slot);
     diag_warn(&ctx->tokens, r, "TODO");
     return DIRECTIVE_SUCCESS;
 }
 
 // 'define' IDENT '(' IDENT-LIST ')' PP-TOKENS NEWLINE
 // 'define' IDENT                    PP-TOKENS NEWLINE
-static DirectiveResult cpp__define(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot, Lexer* restrict in) {
-    Token key = lexer_read(in);
+static DirectiveResult cpp__define(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot) {
+    Token key = cpp_lexer_read(slot);
     SourceLoc key_loc = key.location;
 
     if (key.type != TOKEN_IDENTIFIER) {
@@ -98,9 +97,9 @@ static DirectiveResult cpp__define(Cuik_CPP* restrict ctx, CPPStackSlot* restric
     // if there's a parenthesis directly after the identifier
     // it's a macro function... yes this is an purposeful off-by-one
     // it's mostly ok tho
-    Token t = lexer_read(in);
+    Token t = cpp_lexer_read(slot);
     if (key.content.data[key.content.length] == '(') {
-        t = lexer_read(in);
+        t = cpp_lexer_read(slot);
 
         int arg_count = 0;
         while (t.type != 0 && t.type != ')') {
@@ -109,7 +108,7 @@ static DirectiveResult cpp__define(Cuik_CPP* restrict ctx, CPPStackSlot* restric
                     diag_err(&ctx->tokens, get_token_range(&t), "expected comma");
                 }
 
-                t = lexer_read(in);
+                t = cpp_lexer_read(slot);
             }
 
             if (t.type != TOKEN_TRIPLE_DOT && t.type != TOKEN_IDENTIFIER) {
@@ -120,10 +119,10 @@ static DirectiveResult cpp__define(Cuik_CPP* restrict ctx, CPPStackSlot* restric
                 arg_count++;
             }
 
-            t = lexer_read(in);
+            t = cpp_lexer_read(slot);
         }
 
-        t = lexer_read(in);
+        t = cpp_lexer_read(slot);
     }
 
     SourceLoc loc = t.location;
@@ -159,15 +158,13 @@ static DirectiveResult cpp__define(Cuik_CPP* restrict ctx, CPPStackSlot* restric
     }
     #else
     while (t.type && !t.hit_line) {
-        t = lexer_read(in);
+        t = cpp_lexer_read(slot);
     }
-    const unsigned char* end = t.content.data;
+    unsigned char* end = (unsigned char*) t.content.data;
     #endif
 
     // push back before the newline
-    in->current = (unsigned char*) end;
-
-    // printf("%.*s -> %.*s\n", (int)key.content.length, key.content.data, (int) (end - start), start);
+    cpp_lexer_seek(slot, end);
 
     cuikperf_region_start("insert", NULL);
     MacroDef* def = insert_symtab(ctx, key.content.length, (const char*) key.content.data);
@@ -179,21 +176,21 @@ static DirectiveResult cpp__define(Cuik_CPP* restrict ctx, CPPStackSlot* restric
 }
 
 // 'if' EXPR NEWLINE GROUP[OPT]
-static DirectiveResult cpp__if(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot, Lexer* restrict in) {
+static DirectiveResult cpp__if(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot) {
     SourceRange r = get_token_range(&ctx->directive_token);
-    if (eval(ctx, in)) {
+    if (eval(ctx, slot)) {
         if (!push_scope(ctx, r, true)) return DIRECTIVE_ERROR;
     } else {
         if (!push_scope(ctx, r, false)) return DIRECTIVE_ERROR;
-        skip_directive_body(in);
+        skip_directive_body(slot);
     }
 
     return DIRECTIVE_SUCCESS;
 }
 
 // 'ifdef' IDENT NEWLINE GROUP[OPT]
-static DirectiveResult cpp__ifdef(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot, Lexer* restrict in) {
-    Token t = lexer_read(in);
+static DirectiveResult cpp__ifdef(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot) {
+    Token t = cpp_lexer_read(slot);
     SourceRange r = get_token_range(&t);
     if (t.type != TOKEN_IDENTIFIER) {
         diag_err(&ctx->tokens, r, "expected identifier");
@@ -204,15 +201,15 @@ static DirectiveResult cpp__ifdef(Cuik_CPP* restrict ctx, CPPStackSlot* restrict
         if (!push_scope(ctx, r, true)) return DIRECTIVE_ERROR;
     } else {
         if (!push_scope(ctx, r, false)) return DIRECTIVE_ERROR;
-        skip_directive_body(in);
+        skip_directive_body(slot);
     }
 
     return DIRECTIVE_SUCCESS;
 }
 
 // 'ifndef' IDENT NEWLINE GROUP[OPT]
-static DirectiveResult cpp__ifndef(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot, Lexer* restrict in) {
-    Token t = lexer_read(in);
+static DirectiveResult cpp__ifndef(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot) {
+    Token t = cpp_lexer_read(slot);
     SourceRange r = get_token_range(&t);
     if (t.type != TOKEN_IDENTIFIER) {
         diag_err(&ctx->tokens, r, "expected identifier");
@@ -230,21 +227,21 @@ static DirectiveResult cpp__ifndef(Cuik_CPP* restrict ctx, CPPStackSlot* restric
         }
     } else {
         if (!push_scope(ctx, r, false)) return DIRECTIVE_ERROR;
-        skip_directive_body(in);
+        skip_directive_body(slot);
     }
 
     return DIRECTIVE_SUCCESS;
 }
 
 // 'elif' EXPR NEWLINE GROUP[OPT]
-static DirectiveResult cpp__elif(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot, Lexer* restrict in) {
+static DirectiveResult cpp__elif(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot) {
     int last_scope = ctx->depth - 1;
 
     // if it didn't evaluate any of the other options try to do this
-    if (!ctx->scope_eval[last_scope].value && eval(ctx, in)) {
+    if (!ctx->scope_eval[last_scope].value && eval(ctx, slot)) {
         ctx->scope_eval[last_scope].value = true;
     } else {
-        skip_directive_body(in);
+        skip_directive_body(slot);
     }
 
     // we should be one a different line now
@@ -252,20 +249,20 @@ static DirectiveResult cpp__elif(Cuik_CPP* restrict ctx, CPPStackSlot* restrict 
 }
 
 // 'else' NEWLINE GROUP[OPT]
-static DirectiveResult cpp__else(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot, Lexer* restrict in) {
+static DirectiveResult cpp__else(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot) {
     // if it didn't evaluate any of the other options
     // do this
     int last_scope = ctx->depth - 1;
     if (!ctx->scope_eval[last_scope].value) {
         ctx->scope_eval[last_scope].value = true;
     } else {
-        skip_directive_body(in);
+        skip_directive_body(slot);
     }
 
     return DIRECTIVE_SUCCESS;
 }
 
-static DirectiveResult cpp__endif(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot, Lexer* restrict in) {
+static DirectiveResult cpp__endif(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot) {
     SourceRange r = get_token_range(&ctx->directive_token);
     if (slot->include_guard.status == INCLUDE_GUARD_LOOKING_FOR_ENDIF && slot->include_guard.if_depth == ctx->depth) {
         if (!is_defined(ctx, slot->include_guard.define.data, slot->include_guard.define.length)) {
@@ -276,12 +273,12 @@ static DirectiveResult cpp__endif(Cuik_CPP* restrict ctx, CPPStackSlot* restrict
         }
     }
 
-    warn_if_newline(in);
+    warn_if_newline(slot);
     return pop_scope(ctx, r) ? DIRECTIVE_SUCCESS : DIRECTIVE_ERROR;
 }
 
-static DirectiveResult cpp__undef(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot, Lexer* restrict in) {
-    Token key = lexer_read(in);
+static DirectiveResult cpp__undef(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot) {
+    Token key = cpp_lexer_read(slot);
     if (key.type != TOKEN_IDENTIFIER) {
         SourceRange r = { key.location, get_end_location(&key) };
         diag_err(&ctx->tokens, r, "expected identifier");
@@ -292,13 +289,13 @@ static DirectiveResult cpp__undef(Cuik_CPP* restrict ctx, CPPStackSlot* restrict
     return DIRECTIVE_SUCCESS;
 }
 
-static char* parse_directive_path(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot, Lexer* restrict in, bool* is_lib_include) {
+static char* parse_directive_path(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot, bool* is_lib_include) {
     int start = dyn_array_length(ctx->tokens.list.tokens);
 
     // place all the tokens on this line into the buffer to be expanded
     Token t;
     for (;;) {
-        t = lexer_read(in);
+        t = cpp_lexer_read(slot);
         if (t.type == 0 || t.hit_line) { break; }
         push_token(ctx, t);
 
@@ -307,14 +304,14 @@ static char* parse_directive_path(Cuik_CPP* restrict ctx, CPPStackSlot* restrict
             MacroDef* def = find_define(ctx, t.content.data, t.content.length);
             if (def != NULL) {
                 int head = dyn_array_length(ctx->tokens.list.tokens);
-                expand_identifier(ctx, in, NULL, head-1, head, 0, def, 0, NULL);
+                expand_identifier(ctx, slot, NULL, head-1, head, 0, def, 0, NULL);
             }
         }
     }
 
     // revert to before the line
     int end = dyn_array_length(ctx->tokens.list.tokens);
-    in->current = (unsigned char*) t.content.data;
+    cpp_lexer_seek(slot, (unsigned char*) t.content.data);
 
     size_t len = 0;
     char* filename = tb_arena_alloc(&ctx->perm_arena, FILENAME_MAX);
@@ -377,9 +374,9 @@ static char* parse_directive_path(Cuik_CPP* restrict ctx, CPPStackSlot* restrict
     return filename;
 }
 
-static DirectiveResult cpp__include(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot, Lexer* restrict in) {
+static DirectiveResult cpp__include(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot) {
     bool is_lib_include;
-    char* filename = parse_directive_path(ctx, slot, in, &is_lib_include);
+    char* filename = parse_directive_path(ctx, slot, &is_lib_include);
     if (filename == NULL) {
         return DIRECTIVE_ERROR;
     }
@@ -411,16 +408,16 @@ static DirectiveResult cpp__include(Cuik_CPP* restrict ctx, CPPStackSlot* restri
         }
     }
 
-    // printf("AAA %s\n", canonical.data);
-    Cuik_Path* alloced_filepath = alloc_path(ctx, canonical.data);
-
     // insert incomplete new stack slot
-    CPPStackSlot* restrict new_slot = &ctx->stack[ctx->stack_ptr++];
+    TB_ArenaSavepoint sp = tb_arena_save(&ctx->tmp_arena);
+    CPPStackSlot* new_slot = tb_arena_alloc(&ctx->tmp_arena, sizeof(CPPStackSlot));
     *new_slot = (CPPStackSlot){
-        .filepath = alloced_filepath,
+        .prev = ctx->stack,
+        .sp = sp,
         .directory = alloc_directory_path(ctx, canonical.data),
         .loc = ctx->directive_token.location
     };
+    ctx->stack = new_slot;
 
     // read new file & lex
     #if CUIK__CPP_STATS
@@ -438,6 +435,8 @@ static DirectiveResult cpp__include(Cuik_CPP* restrict ctx, CPPStackSlot* restri
     ctx->total_files_read += 1;
     #endif
 
+    new_slot->filepath = alloc_path(ctx, canonical.data);
+
     // initialize the file & lexer in the stack new_slot
     new_slot->include_guard = (struct CPPIncludeGuard){ 0 };
     // initialize the lexer in the stack slot & record file entry
@@ -447,7 +446,7 @@ static DirectiveResult cpp__include(Cuik_CPP* restrict ctx, CPPStackSlot* restri
         .start = (unsigned char*) next_file.data,
         .current = (unsigned char*) next_file.data,
     };
-    compute_line_map(ctx, l & LOCATE_SYSTEM, ctx->stack_ptr - 1, new_slot->loc, alloced_filepath->data, next_file.data, next_file.length);
+    compute_line_map(ctx, l & LOCATE_SYSTEM, new_slot->loc, new_slot->filepath->data, next_file.data, next_file.length);
 
     if (cuikperf_is_active()) {
         cuikperf_region_end();
@@ -458,10 +457,10 @@ static DirectiveResult cpp__include(Cuik_CPP* restrict ctx, CPPStackSlot* restri
 }
 
 // 'pragma' PP-TOKENS[OPT] NEWLINE
-static DirectiveResult cpp__pragma(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot, Lexer* restrict in) {
+static DirectiveResult cpp__pragma(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot) {
     TokenStream* restrict s = &ctx->tokens;
 
-    Token t = lexer_read(in);
+    Token t = cpp_lexer_read(slot);
     SourceLoc loc = t.location;
     String pragma_type = t.content;
 
@@ -470,16 +469,16 @@ static DirectiveResult cpp__pragma(Cuik_CPP* restrict ctx, CPPStackSlot* restric
         nl_map_put_cstr(ctx->include_once, slot->filepath->data, e);
 
         // We gotta hit a line by now
-        warn_if_newline(in);
+        warn_if_newline(slot);
     } else if (string_equals_cstr(&pragma_type, "message")) {
-        t = lexer_read(in);
+        t = cpp_lexer_read(slot);
 
         int start = dyn_array_length(ctx->tokens.list.tokens);
         while (t.type && !t.hit_line) {
             push_token(ctx, t);
-            t = lexer_read(in);
+            t = cpp_lexer_read(slot);
         }
-        in->current = (unsigned char*) t.content.data;
+        cpp_lexer_seek(slot, (unsigned char*) t.content.data);
 
         SourceRange r = get_token_range(&ctx->directive_token);
         Token t = quote_token_array(ctx, loc, start, dyn_array_length(ctx->tokens.list.tokens));
@@ -495,9 +494,9 @@ static DirectiveResult cpp__pragma(Cuik_CPP* restrict ctx, CPPStackSlot* restric
         int start = dyn_array_length(ctx->tokens.list.tokens);
         while (t.type && !t.hit_line) {
             push_token(ctx, t);
-            t = lexer_read(in);
+            t = cpp_lexer_read(slot);
         }
-        in->current = (unsigned char*) t.content.data;
+        cpp_lexer_seek(slot, (unsigned char*) t.content.data);
 
         t = quote_token_array(ctx, loc, start, dyn_array_length(ctx->tokens.list.tokens));
         dyn_array_set_length(ctx->tokens.list.tokens, start);
@@ -511,7 +510,7 @@ static DirectiveResult cpp__pragma(Cuik_CPP* restrict ctx, CPPStackSlot* restric
 }
 
 #if 0
-static DirectiveResult cpp__embed(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot, Lexer* restrict in) {
+static DirectiveResult cpp__embed(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot) {
     SourceRange loc = get_token_range(&in->tokens[in->current]);
     TokenStream* restrict s = &ctx->tokens;
 
@@ -560,13 +559,13 @@ static DirectiveResult cpp__embed(Cuik_CPP* restrict ctx, CPPStackSlot* restrict
 }
 
 // passthrough all tokens raw
-static DirectiveResult cpp__version(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot, Lexer* restrict in) {
+static DirectiveResult cpp__version(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot) {
     __debugbreak();
     return DIRECTIVE_SUCCESS;
 
     #if 0
-    push_token(ctx, lexer_read(in));
-    push_token(ctx, lexer_read(in));
+    push_token(ctx, cpp_lexer_read(slot));
+    push_token(ctx, cpp_lexer_read(slot));
 
     for (;;) {
         Token t = consume(in);
@@ -580,7 +579,7 @@ static DirectiveResult cpp__version(Cuik_CPP* restrict ctx, CPPStackSlot* restri
     #endif
 }
 
-static DirectiveResult cpp__extension(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot, Lexer* restrict in) {
+static DirectiveResult cpp__extension(Cuik_CPP* restrict ctx, CPPStackSlot* restrict slot) {
     return cpp__version(ctx, slot, in);
 }
 #endif

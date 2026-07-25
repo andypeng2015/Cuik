@@ -520,8 +520,8 @@ Cuik_BuildStep* cuik_driver_ld(Cuik_DriverArgs* args, int dep_count, Cuik_BuildS
 
     #ifdef CONFIG_HAS_TB
     s->ld.cu->ir_mod = tb_module_create(
-        args->target->arch, (TB_System) cuik_get_target_system(args->target), args->run
-    );
+                                        args->target->arch, (TB_System) cuik_get_target_system(args->target), args->run
+                                        );
 
     if (!args->nochkstk) {
         tb_module_enable_chkstk(s->ld.cu->ir_mod);
@@ -720,12 +720,12 @@ static bool run_cpp(Cuik_CPP* cpp, const Cuik_DriverArgs* args, bool should_fina
                     cuikpp_define_empty_cstr(cpp, args->defines[i]);
                 } else {
                     cuikpp_define(
-                        cpp,
-                        // before equals
-                        equal - args->defines[i], args->defines[i],
-                        // after equals
-                        strlen(equal + 1), equal + 1
-                    );
+                                  cpp,
+                                  // before equals
+                                  equal - args->defines[i], args->defines[i],
+                                  // after equals
+                                  strlen(equal + 1), equal + 1
+                                  );
                 }
             }
         }
@@ -749,14 +749,14 @@ CUIK_API Cuik_CPP* cuik_driver_preprocess(const char* filepath, const Cuik_Drive
     Cuik_CPP* cpp = NULL;
     CUIK_TIMED_BLOCK("cuikpp_make") {
         cpp = cuikpp_make(&(Cuik_CPPDesc){
-                .version       = args->version,
-                .case_insensitive = args->toolchain.case_insensitive,
-                .filepath      = filepath,
-                .locate        = cuikpp_locate_file,
-                .fs            = cuikpp_default_fs,
-                .diag_data     = args->diag_userdata,
-                .diag          = args->diag_callback,
-            });
+                          .version       = args->version,
+                          .case_insensitive = args->toolchain.case_insensitive,
+                          .filepath      = filepath,
+                          .locate        = cuikpp_locate_file,
+                          .fs            = cuikpp_default_fs,
+                          .diag_data     = args->diag_userdata,
+                          .diag          = args->diag_callback,
+                          });
     }
 
     return run_cpp(cpp, args, should_finalize) ? cpp : NULL;
@@ -766,14 +766,14 @@ CUIK_API Cuik_CPP* cuik_driver_preprocess_str(String source, const Cuik_DriverAr
     Cuik_CPP* cpp = NULL;
     CUIK_TIMED_BLOCK("cuikpp_make") {
         cpp = cuikpp_make(&(Cuik_CPPDesc){
-                .version       = args->version,
-                .case_insensitive = args->toolchain.case_insensitive,
-                .fs_data       = &source,
-                .locate        = cuikpp_locate_file,
-                .fs            = cuikpp_default_fs,
-                .diag_data     = args->diag_userdata,
-                .diag          = args->diag_callback,
-            });
+                          .version       = args->version,
+                          .case_insensitive = args->toolchain.case_insensitive,
+                          .fs_data       = &source,
+                          .locate        = cuikpp_locate_file,
+                          .fs            = cuikpp_default_fs,
+                          .diag_data     = args->diag_userdata,
+                          .diag          = args->diag_callback,
+                          });
     }
 
     return run_cpp(cpp, args, should_finalize) ? cpp : NULL;
@@ -783,14 +783,14 @@ CUIK_API Cuik_CPP* cuik_driver_preprocess_cstr(const char* source, const Cuik_Dr
     Cuik_CPP* cpp = NULL;
     CUIK_TIMED_BLOCK("cuikpp_make") {
         cpp = cuikpp_make(&(Cuik_CPPDesc){
-                .version       = args->version,
-                .case_insensitive = args->toolchain.case_insensitive,
-                .fs_data       = &(String){ strlen(source), (const unsigned char*) source },
-                .locate        = cuikpp_locate_file,
-                .fs            = cuikpp_default_fs,
-                .diag_data     = args->diag_userdata,
-                .diag          = args->diag_callback,
-            });
+                          .version       = args->version,
+                          .case_insensitive = args->toolchain.case_insensitive,
+                          .fs_data       = &(String){ strlen(source), (const unsigned char*) source },
+                          .locate        = cuikpp_locate_file,
+                          .fs            = cuikpp_default_fs,
+                          .diag_data     = args->diag_userdata,
+                          .diag          = args->diag_callback,
+                          });
     }
 
     return run_cpp(cpp, args, should_finalize) ? cpp : NULL;
